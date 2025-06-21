@@ -39,7 +39,7 @@ chmod +x ct-monitor.py
 
 ```bash
 # Monitor recent certificates from all CT logs
-python3 c-_monitor.py -n 1000
+python3 ct-monitor.py -n 1000
 
 # Search for specific domains
 python3 ct-monitor.py -m ".*\.example\.com$" -n 2000
