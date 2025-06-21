@@ -1,0 +1,18 @@
+# Certificate Transparency Log Monitor - Requirements
+# Core dependencies for certificate processing and network operations
+
+# HTTP requests and SSL handling
+requests>=2.28.0
+urllib3>=1.26.0
+
+# Certificate parsing and cryptographic operations
+cryptography>=3.4.8
+
+# Public suffix list for domain validation
+publicsuffix2>=3.0.0
+
+# Cross-platform colored terminal output
+colorama>=0.4.4
+
+# Standard library typing support for older Python versions
+typing-extensions>=4.0.0;python_version<"3.8"
