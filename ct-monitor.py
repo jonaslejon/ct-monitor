@@ -2,9 +2,27 @@
 """
 Certificate Transparency Log Monitor
 Monitors CT logs and extracts domain names and certificate information
+
+A powerful Python tool for monitoring Certificate Transparency (CT) logs to extract 
+domain names, IP addresses, and email addresses from SSL/TLS certificates in real-time.
+
+Features:
+- Multi-threaded processing of multiple CT logs
+- Pattern matching with regex filtering  
+- Quiet mode for automation and piping
+- Verbose mode for debugging and analysis
+- Real-time statistics and progress tracking
+- Smart rate limit handling with exponential backoff
+- Follow mode for continuous monitoring
+- Support for all major CT log operators
+
+Version: 1.0.1
+Author: Jonas Lejon <jonas.github@triop.se>
+License: MIT
+Repository: https://github.com/jonaslejon/ct-monitor
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __author__ = "Jonas Lejon <jonas.github@triop.se>"
 __license__ = "MIT"
 
@@ -843,11 +861,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 {Fore.GREEN}Examples:{Style.RESET_ALL}
-  {Fore.YELLOW}python ct_monitor.py -l https://ct.googleapis.com/logs/xenon2024/{Style.RESET_ALL}
-  {Fore.YELLOW}python ct_monitor.py -f -n 1000{Style.RESET_ALL}
-  {Fore.YELLOW}python ct_monitor.py -m ".*\\.example\\.com$" -p 30{Style.RESET_ALL}
-  {Fore.YELLOW}python ct_monitor.py -v -m "microsoft" -n 500{Style.RESET_ALL}
-  {Fore.YELLOW}python ct_monitor.py -q -m "github" -n 1000 > domains.json{Style.RESET_ALL}
+  {Fore.YELLOW}python ct-monitor.py -l https://ct.googleapis.com/logs/xenon2024/{Style.RESET_ALL}
+  {Fore.YELLOW}python ct-monitor.py -f -n 1000{Style.RESET_ALL}
+  {Fore.YELLOW}python ct-monitor.py -m ".*\\.example\\.com$" -p 30{Style.RESET_ALL}
+  {Fore.YELLOW}python ct-monitor.py -v -m "microsoft" -n 500{Style.RESET_ALL}
+  {Fore.YELLOW}python ct-monitor.py -q -m "github" -n 1000 > domains.json{Style.RESET_ALL}
 
 {Fore.BLUE}Output Emojis:{Style.RESET_ALL}
   🌐 Domain name
