@@ -4,6 +4,10 @@ Certificate Transparency Log Monitor
 Monitors CT logs and extracts domain names and certificate information
 """
 
+__version__ = "1.0.0"
+__author__ = "Jonas Lejon <jonas.github@triop.se>"
+__license__ = "MIT"
+
 import argparse
 import base64
 import hashlib
@@ -835,7 +839,7 @@ class CTLogMonitor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description=f"{Fore.CYAN}🔍 Certificate Transparency Log Monitor{Style.RESET_ALL} - Extracts domain names from CT logs",
+        description=f"{Fore.CYAN}🔍 Certificate Transparency Log Monitor v{__version__}{Style.RESET_ALL} - Extracts domain names from CT logs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 {Fore.GREEN}Examples:{Style.RESET_ALL}
@@ -849,8 +853,11 @@ def main():
   🌐 Domain name
   📍 IPv4 address  
   🔢 IPv6 address
+
+{Fore.CYAN}Version: {__version__} | License: {__license__}{Style.RESET_ALL}
         """
     )
+    parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     parser.add_argument('-l', '--log-url', help='Only read from the specified CT log URL')
     parser.add_argument('-n', '--tail-count', type=int, default=100, 
                        help='Number of entries from the end to start from (default: 100)')
@@ -875,8 +882,8 @@ def main():
         verbose_status = f"{Fore.GREEN}Yes{Style.RESET_ALL}" if args.verbose else f"{Fore.YELLOW}No{Style.RESET_ALL}"
         quiet_status = f"{Fore.GREEN}Yes{Style.RESET_ALL}" if args.quiet else f"{Fore.YELLOW}No{Style.RESET_ALL}"
         print(f"""
-{Fore.CYAN}{Style.BRIGHT}🔍 Certificate Transparency Log Monitor{Style.RESET_ALL}
-{Fore.BLUE}{'='*50}{Style.RESET_ALL}
+{Fore.CYAN}{Style.BRIGHT}🔍 Certificate Transparency Log Monitor v{__version__}{Style.RESET_ALL}
+{Fore.BLUE}{'='*60}{Style.RESET_ALL}
 {Fore.GREEN}🎯 Target:{Style.RESET_ALL} {'Single log' if args.log_url else 'All known logs'}
 {Fore.GREEN}📊 Tail count:{Style.RESET_ALL} {args.tail_count}
 {Fore.GREEN}⏱️  Poll interval:{Style.RESET_ALL} {args.poll_time}s
@@ -884,7 +891,7 @@ def main():
 {Fore.GREEN}🔍 Pattern:{Style.RESET_ALL} {args.pattern if args.pattern else 'None'}
 {Fore.GREEN}🗣️  Verbose mode:{Style.RESET_ALL} {verbose_status}
 {Fore.GREEN}🤫 Quiet mode:{Style.RESET_ALL} {quiet_status}
-{Fore.BLUE}{'='*50}{Style.RESET_ALL}
+{Fore.BLUE}{'='*60}{Style.RESET_ALL}
         """, file=sys.stderr)
         
         if args.verbose:
