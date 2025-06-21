@@ -9,7 +9,7 @@ urllib3>=1.26.0
 cryptography>=3.4.8
 
 # Public suffix list for domain validation
-publicsuffix2>=3.0.0
+publicsuffix2>=2.20191221
 
 # Cross-platform colored terminal output
 colorama>=0.4.4
