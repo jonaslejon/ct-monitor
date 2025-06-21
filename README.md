@@ -229,7 +229,7 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 ### Development Setup
 
 ```bash
-git clone https://github.com/yourusername/ct-monitor.git
+git clone https://github.com/jonaslejon/ct-monitor.git
 cd ct-monitor
 pip install -r requirements.txt
 ```
