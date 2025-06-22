@@ -1,35 +1,4 @@
-if __name__ == "__main__":
-    # Run the tests
-    pytest.main([__file__, "-v"])    def test_monitor_initialization_with_params(self):
-        """Test CTLogMonitor initialization with custom parameters"""
-        # Test with parameters that the constructor accepts
-        try:
-            monitor = CTLogMonitor(
-                log_url="https://test.ct.log",
-                tail_count=50,
-                poll_time=5,
-                follow=True,
-                pattern="test.*",
-                verbose=True,
-                quiet=False
-            )
-            
-            # Check that parameters were set correctly
-            assert monitor.log_url == "https://test.ct.log"
-            assert monitor.tail_count == 50
-            assert monitor.poll_time == 5
-            assert monitor.follow is True
-            assert monitor.pattern is not None  # Should be compiled regex
-            
-            # verbose and quiet are passed to logger, not stored directly
-            if hasattr(monitor, 'logger'):
-                assert hasattr(monitor.logger, 'verbose')
-                assert hasattr(monitor.logger, 'quiet')
-                assert monitor.logger.verbose is True
-                assert monitor.logger.quiet is False
-                
-        except Exception as e:
-            pytest.fail(f"CTLogMonitor initialization with parameters failed: {e}")#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Test suite for Certificate Transparency Log Monitor
 
@@ -174,9 +143,6 @@ class TestCTLogMonitor:
         
         # Check that basic attributes exist and have expected values if they exist
         assert hasattr(monitor, 'log_url')
-        if hasattr(monitor, 'log_url'):
-            # log_url might be None or have a default value
-            pass
         
         # Check common attributes that might exist
         expected_attrs = {
@@ -184,8 +150,6 @@ class TestCTLogMonitor:
             'poll_time': 10,
             'follow': False,
             'pattern': None,
-            'verbose': False,
-            'quiet': False
         }
         
         for attr, expected_value in expected_attrs.items():
@@ -199,8 +163,6 @@ class TestCTLogMonitor:
             stat_methods = ['increment_input', 'increment_output', 'increment_errors', 'increment_processed', 'get_stats']
             for method in stat_methods:
                 assert hasattr(stats_obj, method), f"Stats object should have method: {method}"
-    
-    def test_monitor_basic_attributes(self):
     
     def test_monitor_basic_attributes(self):
         """Test that CTLogMonitor has basic expected attributes"""
@@ -218,22 +180,37 @@ class TestCTLogMonitor:
         for attr in component_attrs:
             if hasattr(monitor, attr):
                 assert getattr(monitor, attr) is not None, f"Component {attr} should not be None"
+    
+    def test_monitor_initialization_with_params(self):
         """Test CTLogMonitor initialization with custom parameters"""
+        # Test with parameters that the constructor accepts
         try:
             monitor = CTLogMonitor(
+                log_url="https://test.ct.log",
                 tail_count=50,
                 poll_time=5,
                 follow=True,
-                verbose=True
+                pattern="test.*",
+                verbose=True,
+                quiet=False
             )
             
+            # Check that parameters were set correctly
+            assert monitor.log_url == "https://test.ct.log"
             assert monitor.tail_count == 50
             assert monitor.poll_time == 5
             assert monitor.follow is True
-            assert monitor.verbose is True
-        except TypeError:
-            # If the constructor doesn't accept these parameters, that's also valid
-            pytest.skip("CTLogMonitor constructor doesn't accept these parameters")
+            assert monitor.pattern is not None  # Should be compiled regex
+            
+            # verbose and quiet are passed to logger, not stored directly
+            if hasattr(monitor, 'logger'):
+                assert hasattr(monitor.logger, 'verbose')
+                assert hasattr(monitor.logger, 'quiet')
+                assert monitor.logger.verbose is True
+                assert monitor.logger.quiet is False
+                
+        except Exception as e:
+            pytest.fail(f"CTLogMonitor initialization with parameters failed: {e}")
     
     def test_scrub_x509_value(self):
         """Test X509 value scrubbing functionality"""
@@ -376,3 +353,8 @@ def test_module_can_be_imported():
     assert ct_monitor is not None
     assert CTLogMonitor is not None
     assert CTResult is not None
+
+
+if __name__ == "__main__":
+    # Run the tests
+    pytest.main([__file__, "-v"])
