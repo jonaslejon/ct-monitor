@@ -1,40 +1,35 @@
-def test_monitor_initialization_with_params(self):
+if __name__ == "__main__":
+    # Run the tests
+    pytest.main([__file__, "-v"])    def test_monitor_initialization_with_params(self):
         """Test CTLogMonitor initialization with custom parameters"""
-        # Try to instantiate with common parameters
+        # Test with parameters that the constructor accepts
         try:
-            # First try without any parameters to establish baseline
-            monitor = CTLogMonitor()
+            monitor = CTLogMonitor(
+                log_url="https://test.ct.log",
+                tail_count=50,
+                poll_time=5,
+                follow=True,
+                pattern="test.*",
+                verbose=True,
+                quiet=False
+            )
             
-            # Now try with parameters if the constructor supports them
-            # We'll use a try-except approach since we don't know the exact signature
-            param_combinations = [
-                {'tail_count': 50},
-                {'poll_time': 5},
-                {'follow': True},
-                {'verbose': True},
-            ]
+            # Check that parameters were set correctly
+            assert monitor.log_url == "https://test.ct.log"
+            assert monitor.tail_count == 50
+            assert monitor.poll_time == 5
+            assert monitor.follow is True
+            assert monitor.pattern is not None  # Should be compiled regex
             
-            success_count = 0
-            for params in param_combinations:
-                try:
-                    test_monitor = CTLogMonitor(**params)
-                    success_count += 1
-                    
-                    # If successful, check that the parameter was set (if the attribute exists)
-                    for param_name, param_value in params.items():
-                        if hasattr(test_monitor, param_name):
-                            actual_value = getattr(test_monitor, param_name)
-                            assert actual_value == param_value, f"Parameter {param_name} not set correctly"
-                        
-                except TypeError:
-                    # Constructor doesn't accept this parameter, that's okay
-                    continue
-            
-            # We don't require any specific parameters to work, just that the constructor works
-            assert True  # Test passes if we get here without exceptions
-            
+            # verbose and quiet are passed to logger, not stored directly
+            if hasattr(monitor, 'logger'):
+                assert hasattr(monitor.logger, 'verbose')
+                assert hasattr(monitor.logger, 'quiet')
+                assert monitor.logger.verbose is True
+                assert monitor.logger.quiet is False
+                
         except Exception as e:
-            pytest.fail(f"CTLogMonitor instantiation failed: {e}")#!/usr/bin/env python3
+            pytest.fail(f"CTLogMonitor initialization with parameters failed: {e}")#!/usr/bin/env python3
 """
 Test suite for Certificate Transparency Log Monitor
 
@@ -198,36 +193,31 @@ class TestCTLogMonitor:
                 actual_value = getattr(monitor, attr)
                 assert actual_value == expected_value, f"Expected {attr}={expected_value}, got {actual_value}"
         
-        # Check statistics initialization - these are likely to exist
-        stat_attrs = ['stat_input', 'stat_output', 'stat_errors', 'stat_processed']
-        for attr in stat_attrs:
-            if hasattr(monitor, attr):
-                # These should probably be initialized to 0
-                actual_value = getattr(monitor, attr)
-                assert isinstance(actual_value, int), f"{attr} should be an integer"
-                assert actual_value >= 0, f"{attr} should be non-negative"
+        # Check statistics - in the real implementation, these are in a Statistics object
+        if hasattr(monitor, 'stats'):
+            stats_obj = monitor.stats
+            stat_methods = ['increment_input', 'increment_output', 'increment_errors', 'increment_processed', 'get_stats']
+            for method in stat_methods:
+                assert hasattr(stats_obj, method), f"Stats object should have method: {method}"
+    
+    def test_monitor_basic_attributes(self):
     
     def test_monitor_basic_attributes(self):
         """Test that CTLogMonitor has basic expected attributes"""
         monitor = CTLogMonitor()
         
-        # Common attributes that CT monitors typically have
-        common_attrs = [
-            'log_url', 'tail_count', 'poll_time', 'follow', 
-            'pattern', 'verbose', 'quiet'
-        ]
+        # Core attributes that should exist based on the actual implementation
+        required_attrs = ['log_url', 'tail_count', 'poll_time', 'follow', 'pattern']
         
-        # Count how many common attributes exist
-        existing_attrs = [attr for attr in common_attrs if hasattr(monitor, attr)]
+        # Check that required attributes exist
+        for attr in required_attrs:
+            assert hasattr(monitor, attr), f"Monitor should have attribute: {attr}"
         
-        # At least some of these should exist
-        assert len(existing_attrs) > 0, f"Monitor should have at least some common attributes: {common_attrs}"
-        
-        # Check that existing attributes have reasonable types
-        for attr in existing_attrs:
-            value = getattr(monitor, attr)
-            # Just check that the attribute exists and can be accessed
-            assert value is not None or value is None  # This will always pass but confirms access works
+        # Check component attributes
+        component_attrs = ['logger', 'stats', 'http_client', 'cert_parser']
+        for attr in component_attrs:
+            if hasattr(monitor, attr):
+                assert getattr(monitor, attr) is not None, f"Component {attr} should not be None"
         """Test CTLogMonitor initialization with custom parameters"""
         try:
             monitor = CTLogMonitor(
@@ -386,8 +376,3 @@ def test_module_can_be_imported():
     assert ct_monitor is not None
     assert CTLogMonitor is not None
     assert CTResult is not None
-
-
-if __name__ == "__main__":
-    # Run the tests
-    pytest.main([__file__, "-v"])
