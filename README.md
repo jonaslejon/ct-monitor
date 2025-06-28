@@ -222,6 +222,15 @@ python3 ct-monitor.py -v -n 50
 python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/xenon2025/ -n 10
 ```
 
+## ⚠️ Limitations
+
+This tool is a **non-verifying monitor**. It correctly parses certificate data from logs but does not perform the cryptographic verification steps of a full CT auditor. Specifically, it does not:
+
+- **Verify Signed Certificate Timestamps (SCTs)**: The script does not verify the signature on the SCT to ensure it was issued by a trusted log. It trusts the log server to provide authentic data.
+- **Verify Merkle Tree Consistency**: It does not verify inclusion proofs or consistency between different Signed Tree Heads (STHs).
+
+For most monitoring and data extraction purposes, this is a safe and efficient approach. If you require full cryptographic verification, you should use a dedicated CT auditing tool.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
