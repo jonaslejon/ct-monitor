@@ -16,13 +16,13 @@ Features:
 - Follow mode for continuous monitoring
 - Support for all major CT log operators
 
-Version: 1.1.0
+Version: 1.1.1
 Author: Jonas Lejon <jonas.github@triop.se>
 License: MIT
 Repository: https://github.com/jonaslejon/ct-monitor
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __author__ = "Jonas Lejon <jonas.github@triop.se>"
 __license__ = "MIT"
 
@@ -791,7 +791,7 @@ class CTLogMonitor:
                         self.logger.warning(
                             f"💤 Sleeping for {self.poll_time} seconds ({log_url}) at index {start_idx}"
                         )
-                    time.sleep(self.poll_time)
+                    self.http_client._interruptible_sleep(self.poll_time, self.shutdown_event)
                 
                 # Get current tree head
                 self.logger.debug(f"📡 Fetching STH from {log_url}")
@@ -884,21 +884,22 @@ class CTLogMonitor:
     
     def run(self):
         """Main execution method"""
+        exit_code = 0
         try:
             self.logger.info(f"{Style.BRIGHT}🔍 Certificate Transparency Log Monitor Starting...{Style.RESET_ALL}")
-            
+
             # Determine which logs to monitor
             if self.log_url:
                 logs = [self.log_url]
                 self.logger.success(f"🎯 Monitoring single log: {self.log_url}")
             else:
                 logs = self.get_all_logs()
-            
+
             # Show pattern info
             if self.pattern:
                 self.logger.info(f"🔍 Searching for pattern: {self.pattern.pattern}")
                 self.logger.warning("💡 Tip: This will only show certificates matching your pattern!")
-            
+
             # Start worker threads
             num_workers = min(Config.WORKER_THREAD_COUNT, len(logs))
             workers = []
@@ -907,51 +908,39 @@ class CTLogMonitor:
                 worker = threading.Thread(target=self.worker_thread, daemon=True)
                 worker.start()
                 workers.append(worker)
-            
+
             # Start output thread
             self.logger.info("📝 Starting output thread")
             output_worker = threading.Thread(target=self.output_thread, daemon=True)
             output_worker.start()
-            
+
             # Monitor logs
             self.logger.success(f"🚀 Beginning log monitoring with {len(logs)} log(s)")
-            
+
             with ThreadPoolExecutor(max_workers=len(logs)) as executor:
                 futures = [executor.submit(self.monitor_log, log_url) for log_url in logs]
-                
-                try:
-                    # Wait for completion or interruption
-                    for future in as_completed(futures):
-                        if self.shutdown_event.is_set():
-                            break
-                        try:
-                            future.result()  # This will raise any exceptions
-                        except Exception as e:
+
+                # Wait for completion or interruption
+                for future in as_completed(futures):
+                    if self.shutdown_event.is_set():
+                        break
+                    try:
+                        future.result()  # This will raise any exceptions
+                    except Exception as e:
+                        if not self.shutdown_event.is_set():
                             self.logger.error(f"💥 Log monitoring error: {e}")
-                            
-                except KeyboardInterrupt:
-                    # Immediately print message and statistics, then exit
-                    self.logger.warning("\n🛑 Interrupt received, exiting...", force=True)
-                    self._print_final_statistics()
-                    os._exit(0)
-            
-            # Normal completion
-            return 0
             
         except KeyboardInterrupt:
-            # Handle interrupt at outer level
             self.logger.warning("\n🛑 Interrupt received, exiting...", force=True)
-            self._print_final_statistics()
-            os._exit(0)
         except Exception as e:
             self.logger.error(f"💀 Fatal error: {e}")
-            return 1
+            exit_code = 1
         finally:
-            # Only print stats if not already printed by interrupt
-            if not self.shutdown_event.is_set():
-                self._print_final_statistics()
+            # Signal shutdown to all threads and print stats
+            self.shutdown_event.set()
+            self._print_final_statistics()
         
-        return 0
+        return exit_code
     
     def _print_final_statistics(self):
         """Print final statistics summary"""
