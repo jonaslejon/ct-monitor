@@ -48,6 +48,29 @@ python3 ct-monitor.py -m ".*\.example\.com$" -n 2000
 python3 ct-monitor.py -f -n 500
 ```
 
+## 🐳 Docker Usage
+
+You can also run ct-monitor using the official Docker image from Docker Hub.
+
+### Pull the image
+
+```bash
+docker pull jonaslejon/ct-monitor:latest
+```
+
+### Run the container
+
+```bash
+# Monitor recent certificates from all CT logs
+docker run --rm -it jonaslejon/ct-monitor:latest -n 1000
+
+# Search for specific domains
+docker run --rm -it jonaslejon/ct-monitor:latest -m ".*\.example\.com$" -n 2000
+
+# Continuous monitoring
+docker run --rm -it jonaslejon/ct-monitor:latest -f -n 500
+```
+
 ### Advanced Examples
 
 ```bash
