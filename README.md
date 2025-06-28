@@ -171,7 +171,7 @@ done
 Many CT logs, especially Sectigo's, are experiencing severe rate limiting:
 
 - **Sectigo logs**: 20 req/sec per IP, 400 req/sec global limit
-- **High error rates**: 91-94% availability on some logs
+- **High error rates**: Some logs have availability below the recommended 99%
 - **Recommended**: Use higher `-p` values (30-60 seconds) for Sectigo logs
 
 ### Optimization Tips
@@ -214,7 +214,7 @@ The tool gracefully handles:
 ### Common Issues
 
 **High parse error rates**: 
-- Normal for CT logs (30-40% failure rate is typical)
+- Normal for CT logs (a small percentage of failure is typical)
 - Precertificates are harder to parse than regular certificates
 
 **Rate limiting errors**:
