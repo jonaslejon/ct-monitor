@@ -22,7 +22,7 @@ License: MIT
 Repository: https://github.com/jonaslejon/ct-monitor
 """
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 __author__ = "Jonas Lejon <jonas.github@triop.se>"
 __license__ = "MIT"
 
