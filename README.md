@@ -85,6 +85,12 @@ python3 ct-monitor.py -q -n 10000 | jq 'select(.email != null)'
 
 # Monitor specific patterns with custom rate limiting
 python3 ct-monitor.py -m ".*\.microsoft\.com$" -p 30 -f
+
+# Elasticsearch output with timeout
+python3 ct-monitor.py --es-output --timeout 30 -f
+
+# Batch processing to Elasticsearch
+python3 ct-monitor.py --es-output -n 5000
 ```
 
 ## 📋 Command Line Options
@@ -98,6 +104,8 @@ python3 ct-monitor.py -m ".*\.microsoft\.com$" -p 30 -f
 | `-m, --pattern` | Regex pattern for filtering | None |
 | `-v, --verbose` | Detailed processing info | False |
 | `-q, --quiet` | Suppress status messages | False |
+| `--timeout` | Run for specified minutes then exit | None |
+| `--es-output` | Output to Elasticsearch instead of stdout | False |
 
 ## 📊 Output Format
 
@@ -162,6 +170,10 @@ done
 python3 ct-monitor.py -q -f | while read line; do
   curl -X POST -H "Content-Type: application/json" -d "$line" http://api.internal/certs
 done
+
+# Elasticsearch integration
+python3 ct-monitor.py --es-output -f  # Continuous to ES
+python3 ct-monitor.py --es-output -n 10000  # Batch to ES
 ```
 
 ## 🔥 Rate Limiting & Performance
@@ -244,6 +256,54 @@ python3 ct-monitor.py -v -n 50
 # Check specific certificate details
 python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/xenon2025/ -n 10
 ```
+
+## 📊 Elasticsearch Integration
+
+### Configuration
+
+The tool supports Elasticsearch output via environment variables. Create a `.env` file based on the provided template:
+
+```bash
+# Copy the example file
+cp .env.example .env
+
+# Edit with your Elasticsearch credentials
+nano .env
+```
+
+**Example .env file:**
+```env
+ES_HOST=http://localhost:9200
+ES_USER=elastic
+ES_PASSWORD=your_secure_password_here
+```
+
+### Usage
+
+```bash
+# Send output to Elasticsearch
+python3 ct-monitor.py --es-output -n 1000
+
+# Continuous monitoring to Elasticsearch
+python3 ct-monitor.py --es-output -f
+
+# With custom timeout
+python3 ct-monitor.py --es-output --timeout 60 -n 5000
+```
+
+### Error Handling & Reliability
+
+- ✅ **Startup validation**: Fails immediately if Elasticsearch is unreachable or credentials are invalid
+- ✅ **Runtime retries**: Failed batches are automatically retried every 30 seconds
+- ✅ **Final retry attempt**: All failed batches are retried during graceful shutdown
+- ✅ **Connection errors**: Clear error messages distinguish between authentication failures and connection issues
+
+### Security Notes
+
+- ✅ **Never commit `.env`** to version control (it's in `.gitignore`)
+- ✅ **Use environment variables** instead of hardcoded credentials
+- ✅ **Create dedicated service account** with minimal privileges
+- ✅ **Change default passwords** from installation defaults
 
 ## ⚠️ Limitations
 

@@ -347,6 +347,225 @@ class TestBasicFunctionality:
             pytest.skip("CTResult constructor doesn't accept optional parameters")
 
 
+class TestElasticsearchOutput:
+    """Test Elasticsearch output functionality"""
+
+    @patch.dict('os.environ', {'ES_HOST': 'http://test:9200', 'ES_USER': 'testuser', 'ES_PASSWORD': 'testpass'})
+    def test_elasticsearch_output_initialization(self):
+        """Test ElasticsearchOutput constructor with environment variables"""
+        from elasticsearch_output import ElasticsearchOutput
+
+        # Test with environment variables
+        es = ElasticsearchOutput()
+        assert es.es_host == "http://test:9200"
+        assert es.es_user == "testuser"
+        assert es.es_password == "testpass"
+        assert es.index_prefix == "ct-domains"
+        assert es.batch_size == 1000
+
+    def test_elasticsearch_output_explicit_params(self):
+        """Test ElasticsearchOutput with explicit parameters"""
+        from elasticsearch_output import ElasticsearchOutput
+
+        # Test with explicit parameters
+        es = ElasticsearchOutput(
+            es_host="http://custom:9200",
+            es_user="customuser",
+            es_password="custompass",
+            index_prefix="custom-prefix",
+            batch_size=500
+        )
+
+        assert es.es_host == "http://custom:9200"
+        assert es.es_user == "customuser"
+        assert es.es_password == "custompass"
+        assert es.index_prefix == "custom-prefix"
+        assert es.batch_size == 500
+
+    def test_elasticsearch_session_auth(self):
+        """Test that session authentication is properly configured"""
+        from elasticsearch_output import ElasticsearchOutput
+
+        # Test that session is created with correct auth
+        es = ElasticsearchOutput(es_user="test", es_password="pass")
+
+        # Verify session has correct auth
+        assert es.session.auth == ("test", "pass")
+
+        # Verify headers are set
+        assert es.session.headers['Content-Type'] == 'application/json'
+        assert es.session.headers['Accept'] == 'application/json'
+
+    def test_transform_to_minimal(self):
+        """Test data transformation to minimal format"""
+        from elasticsearch_output import ElasticsearchOutput
+
+        es = ElasticsearchOutput()
+
+        # Test with complete data
+        ct_result = {
+            'name': 'example.com',
+            'ts': 1736832000000,
+            'sha1': 'a1b2c3d4e5f6g7h8i9j0',
+            'dns': ['example.com', 'www.example.com', 'api.example.com']
+        }
+
+        minimal = es.transform_to_minimal(ct_result, "https://ct.googleapis.com/logs/xenon2024/")
+
+        assert minimal["d"] == "example.com"
+        assert minimal["t"] == 1736832000000
+        assert minimal["h"] == "a1b2c3d4e5f6g7h8i9j0"
+        assert minimal["l"] == "g"  # google log source
+        assert minimal["s"] == ["example.com", "www.example.com", "api.example.com"]
+
+    def test_transform_to_minimal_missing_fields(self):
+        """Test transformation with missing fields"""
+        from elasticsearch_output import ElasticsearchOutput
+
+        es = ElasticsearchOutput()
+
+        # Test with missing fields
+        ct_result = {'name': 'example.com'}
+
+        minimal = es.transform_to_minimal(ct_result, "https://unknown.log/")
+
+        assert minimal["d"] == "example.com"
+        assert minimal["t"] == 0
+        assert minimal["h"] == ""
+        assert minimal["l"] == "x"  # default log source
+        assert minimal["s"] == []
+
+    def test_get_log_source_code(self):
+        """Test log source code extraction"""
+        from elasticsearch_output import ElasticsearchOutput
+
+        es = ElasticsearchOutput()
+
+        # Test known log providers
+        assert es._get_log_source_code("https://ct.googleapis.com/logs/xenon2024/") == "g"
+        assert es._get_log_source_code("https://ct.sectigo.com/logs/sectigo2024/") == "s"
+        assert es._get_log_source_code("https://ct.digicert.com/logs/digicert2024/") == "d"
+        assert es._get_log_source_code("https://ct.letsencrypt.org/logs/letsencrypt2024/") == "l"
+
+        # Test unknown log provider
+        assert es._get_log_source_code("https://unknown.log/") == "x"
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_add_to_batch_and_flush(self, mock_session_class):
+        """Test batch accumulation and flushing"""
+        from elasticsearch_output import ElasticsearchOutput
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"items": [{"index": {"status": 201}}]}
+        mock_session.post.return_value = mock_response
+        mock_session_class.return_value = mock_session
+
+        es = ElasticsearchOutput(batch_size=2)  # Small batch for testing
+
+        # Add first item
+        ct_result1 = {
+            'name': 'example1.com',
+            'ts': 1000000000000,
+            'sha1': 'hash1',
+            'dns': ['example1.com']
+        }
+        es.add_to_batch(ct_result1, "https://ct.googleapis.com/logs/xenon2024/")
+
+        # Batch should not flush yet
+        mock_session.post.assert_not_called()
+
+        # Add second item - should trigger flush
+        ct_result2 = {
+            'name': 'example2.com',
+            'ts': 2000000000000,
+            'sha1': 'hash2',
+            'dns': ['example2.com']
+        }
+        es.add_to_batch(ct_result2, "https://ct.googleapis.com/logs/xenon2024/")
+
+        # Verify bulk API was called
+        mock_session.post.assert_called_once()
+        args, kwargs = mock_session.post.call_args
+        assert args[0] == "http://localhost:9200/_bulk"
+
+        # Verify batch was cleared
+        assert len(es.batch) == 0
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_elasticsearch_error_handling(self, mock_session_class):
+        """Test error handling for Elasticsearch failures"""
+        from elasticsearch_output import ElasticsearchOutput
+        import requests
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+        mock_session.post.return_value = mock_response
+        mock_session_class.return_value = mock_session
+
+        es = ElasticsearchOutput(batch_size=1)
+
+        # This should not raise an exception but should log the error
+        ct_result = {
+            'name': 'example.com',
+            'ts': 1000000000000,
+            'sha1': 'hash',
+            'dns': ['example.com']
+        }
+
+        # Should handle error gracefully
+        es.add_to_batch(ct_result, "https://ct.googleapis.com/logs/xenon2024/")
+        es.flush()
+
+        # Verify the request was attempted
+        mock_session.post.assert_called()
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_network_failure_handling(self, mock_session_class):
+        """Test handling of network failures"""
+        from elasticsearch_output import ElasticsearchOutput
+        import requests
+
+        mock_session = Mock()
+        mock_session.post.side_effect = requests.exceptions.ConnectionError("Connection failed")
+        mock_session_class.return_value = mock_session
+
+        es = ElasticsearchOutput(batch_size=1)
+
+        ct_result = {
+            'name': 'example.com',
+            'ts': 1000000000000,
+            'sha1': 'hash',
+            'dns': ['example.com']
+        }
+
+        # Should handle network error gracefully
+        es.add_to_batch(ct_result, "https://ct.googleapis.com/logs/xenon2024/")
+        es.flush()
+
+        # Verify the request was attempted
+        mock_session.post.assert_called()
+
+    def test_get_index_name(self):
+        """Test daily index name generation"""
+        from elasticsearch_output import ElasticsearchOutput
+        from unittest.mock import patch
+        from datetime import datetime
+
+        es = ElasticsearchOutput()
+
+        # Test with specific date
+        with patch('elasticsearch_output.datetime') as mock_dt:
+            mock_dt.now.return_value = datetime(2025, 9, 14)
+            mock_dt.strftime = datetime.strftime
+
+            index_name = es._get_index_name()
+            assert index_name == "ct-domains-2025-09-14"
+
+
 # Test discovery helper
 def test_module_can_be_imported():
     """Ensure the module can be imported successfully"""

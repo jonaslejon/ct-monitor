@@ -352,13 +352,13 @@ class HTTPClient:
     def download_json(self, url: str, shutdown_event: threading.Event) -> Dict:
         """Download JSON data with retry logic"""
         retries = 0
-        
-        while retries <= Config.MAX_DOWNLOAD_RETRIES and not shutdown_event.is_set():
+
+        while not shutdown_event.is_set():
             try:
                 response = self.session.get(url, timeout=Config.DEFAULT_TIMEOUT, verify=False)
                 
                 if response.status_code in [429, 503, 504]:  # Rate limited or unavailable
-                    if retries < Config.MAX_DOWNLOAD_RETRIES and not shutdown_event.is_set():
+                    if not shutdown_event.is_set():
                         retries += 1
                         log_domain = url.split('/')[2] if '/' in url else url
                         self.rate_limited_logs.add(log_domain)
@@ -376,11 +376,11 @@ class HTTPClient:
                 return response.json()
                 
             except requests.exceptions.RequestException as e:
-                if retries < Config.MAX_DOWNLOAD_RETRIES and not shutdown_event.is_set():
+                if not shutdown_event.is_set():
                     retries += 1
                     self.logger.error(
                         f"❌ Request failed for {url}: {e}, "
-                        f"retrying ({retries}/{Config.MAX_DOWNLOAD_RETRIES})"
+                        f"retrying ({retries})"
                     )
                     
                     self._interruptible_sleep(self.poll_time, shutdown_event)
@@ -390,8 +390,6 @@ class HTTPClient:
         
         if shutdown_event.is_set():
             raise KeyboardInterrupt("Shutdown during download")
-            
-        raise Exception(f"Max retries exceeded for {url}")
         
     def _interruptible_sleep(self, seconds: int, shutdown_event: threading.Event):
         """Sleep that can be interrupted by shutdown event"""
@@ -404,20 +402,33 @@ class HTTPClient:
 class CTLogMonitor:
     """Certificate Transparency Log Monitor"""
     
-    def __init__(self, log_url: Optional[str] = None, tail_count: int = Config.DEFAULT_TAIL_COUNT, 
-                 poll_time: int = Config.DEFAULT_POLL_TIME, follow: bool = False, 
-                 pattern: Optional[str] = None, verbose: bool = False, quiet: bool = False):
+    def __init__(self, log_url: Optional[str] = None, tail_count: int = Config.DEFAULT_TAIL_COUNT,
+                 poll_time: int = Config.DEFAULT_POLL_TIME, follow: bool = False,
+                 pattern: Optional[str] = None, verbose: bool = False, quiet: bool = False,
+                 es_output: bool = False, timeout_minutes: Optional[int] = None):
         self.log_url = log_url
         self.tail_count = tail_count
         self.poll_time = poll_time
         self.follow = follow
         self.pattern = re.compile(pattern) if pattern else None
-        
+        self.es_output = es_output
+        self.timeout_minutes = timeout_minutes
+
         # Initialize components
         self.logger = Logger(verbose, quiet)
         self.stats = Statistics()
         self.http_client = HTTPClient(self.logger, poll_time)
         self.cert_parser = CertificateParser(self.logger)
+
+        # Initialize Elasticsearch output if enabled
+        if self.es_output:
+            try:
+                from elasticsearch_output import ElasticsearchOutput
+                self.es_output_handler = ElasticsearchOutput()
+                self.logger.info("✅ Elasticsearch output initialized")
+            except ImportError as e:
+                self.logger.error(f"❌ Failed to initialize Elasticsearch output: {e}")
+                self.es_output = False
         
         # Threading
         self.input_queue = queue.Queue()
@@ -729,22 +740,37 @@ class CTLogMonitor:
                     
                 # Filter out None values for cleaner JSON
                 data = {k: v for k, v in result.to_dict().items() if v is not None}
-                
+
                 # Add colored emoji prefix for terminal visibility
                 domain_type = self._get_domain_type_emoji(result.name)
-                
+
                 # Print with color coding and better formatting
                 current_time = time.time()
-                
-                # Show match notification for patterns
-                if self.pattern:
-                    self.logger.success(f"🎯 MATCH FOUND: {domain_type} {json.dumps(data)}")
-                    self.logger.output(json.dumps(data))
-                else:
-                    if not self.logger.quiet:
-                        self.logger.info(f"{domain_type} {json.dumps(data)}")
-                    else:
+
+                # Send to Elasticsearch if enabled, otherwise output to stdout
+                if self.es_output:
+                    try:
+                        # Get current log URL from monitor context
+                        current_log_url = getattr(self, 'current_monitor_log_url', 'unknown')
+                        self.es_output_handler.add_to_batch(data, current_log_url)
+                        if self.pattern:
+                            self.logger.success(f"🎯 MATCH FOUND: {domain_type} {json.dumps(data)} -> ES")
+                        else:
+                            self.logger.info(f"{domain_type} {json.dumps(data)} -> ES")
+                    except Exception as e:
+                        self.logger.error(f"❌ Failed to send to Elasticsearch: {e}")
+                        # Fallback to stdout
                         self.logger.output(json.dumps(data))
+                else:
+                    # Show match notification for patterns
+                    if self.pattern:
+                        self.logger.success(f"🎯 MATCH FOUND: {domain_type} {json.dumps(data)}")
+                        self.logger.output(json.dumps(data))
+                    else:
+                        if not self.logger.quiet:
+                            self.logger.info(f"{domain_type} {json.dumps(data)}")
+                        else:
+                            self.logger.output(json.dumps(data))
                 
                 self.stats.increment_output()
                 
@@ -776,8 +802,12 @@ class CTLogMonitor:
         """Monitor a single CT log"""
         iteration = 0
         start_idx = 0
-        
+
         self.logger.debug(f"🎯 Starting monitor for {log_url}")
+
+        # Set current log URL for Elasticsearch output context
+        if self.es_output:
+            self.current_monitor_log_url = log_url
         
         try:
             while True:
@@ -914,6 +944,12 @@ class CTLogMonitor:
             output_worker = threading.Thread(target=self.output_thread, daemon=True)
             output_worker.start()
 
+            # Set up timeout if specified
+            if self.timeout_minutes:
+                timeout_seconds = self.timeout_minutes * 60
+                self.logger.info(f"⏰ Timeout set: {self.timeout_minutes} minutes ({timeout_seconds} seconds)")
+                self.start_time = time.time()
+
             # Monitor logs
             self.logger.success(f"🚀 Beginning log monitoring with {len(logs)} log(s)")
 
@@ -921,9 +957,27 @@ class CTLogMonitor:
                 futures = [executor.submit(self.monitor_log, log_url) for log_url in logs]
 
                 # Wait for completion or interruption
+                last_retry_time = time.time()
                 for future in as_completed(futures):
                     if self.shutdown_event.is_set():
                         break
+
+                    # Check timeout if specified
+                    if self.timeout_minutes and time.time() - self.start_time >= timeout_seconds:
+                        self.logger.info(f"⏰ Timeout reached after {self.timeout_minutes} minutes, shutting down...")
+                        self.shutdown_event.set()
+                        break
+
+                    # Periodically retry failed Elasticsearch batches (every 30 seconds)
+                    current_time = time.time()
+                    if (self.es_output and hasattr(self, 'es_output_handler') and
+                        current_time - last_retry_time >= 30):
+                        try:
+                            self.es_output_handler.retry_failed_batches()
+                        except Exception as e:
+                            self.logger.error(f"❌ Failed to retry ES batches: {e}")
+                        last_retry_time = current_time
+
                     try:
                         future.result()  # This will raise any exceptions
                     except Exception as e:
@@ -938,6 +992,15 @@ class CTLogMonitor:
         finally:
             # Signal shutdown to all threads and print stats
             self.shutdown_event.set()
+
+            # Clean up Elasticsearch connection if enabled
+            if self.es_output and hasattr(self, 'es_output_handler'):
+                try:
+                    self.es_output_handler.close()
+                    self.logger.info("✅ Elasticsearch connection closed")
+                except Exception as e:
+                    self.logger.error(f"❌ Error closing Elasticsearch connection: {e}")
+
             self._print_final_statistics()
         
         return exit_code
@@ -995,6 +1058,8 @@ def main():
   {Fore.YELLOW}python ct-monitor.py -m ".*\\.example\\.com$" -p 30{Style.RESET_ALL}
   {Fore.YELLOW}python ct-monitor.py -v -m "microsoft" -n 500{Style.RESET_ALL}
   {Fore.YELLOW}python ct-monitor.py -q -m "github" -n 1000 > domains.json{Style.RESET_ALL}
+  {Fore.YELLOW}python ct-monitor.py --es-output --timeout 30 -f{Style.RESET_ALL}
+  {Fore.YELLOW}python ct-monitor.py --es-output -n 5000{Style.RESET_ALL}
 
 {Fore.BLUE}Output Emojis:{Style.RESET_ALL}
   🌐 Domain name
@@ -1017,6 +1082,10 @@ def main():
                        help='Enable verbose output showing detailed certificate processing')
     parser.add_argument('-q', '--quiet', action='store_true',
                        help='Quiet mode - suppress all status messages, only output results')
+    parser.add_argument('--timeout', type=int, metavar='MINUTES',
+                       help='Run for specified minutes then exit (useful for testing)')
+    parser.add_argument('--es-output', action='store_true',
+                       help='Output to Elasticsearch instead of stdout')
     
     args = parser.parse_args()
     
@@ -1049,6 +1118,9 @@ def main():
         
         if args.quiet:
             logger.info("🤫 Quiet mode enabled - only results will be output")
+
+        if args.es_output:
+            logger.info("📊 Elasticsearch output enabled - sending to ES instead of stdout")
     
     monitor = CTLogMonitor(
         log_url=args.log_url,
@@ -1057,7 +1129,9 @@ def main():
         follow=args.follow,
         pattern=args.pattern,
         verbose=args.verbose,
-        quiet=args.quiet
+        quiet=args.quiet,
+        es_output=args.es_output,
+        timeout_minutes=args.timeout
     )
     
     return monitor.run()
