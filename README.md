@@ -305,9 +305,9 @@ python3 ct-monitor.py --es-output --timeout 60 -n 5000
 - ✅ **Create dedicated service account** with minimal privileges
 - ✅ **Change default passwords** from installation defaults
 
-### 💾 Storage Requirements & Efficiency
+### 💾 Elasticsearch Storage Requirements & Efficiency
 
-Based on production data analysis with full SAN storage:
+Based on production Elasticsearch data analysis with full SAN storage:
 
 **Compression Efficiency**:
 - **156 bytes per domain** (including full SAN lists)
@@ -324,10 +324,10 @@ Based on production data analysis with full SAN storage:
 - **Yearly**: 2.61B domains, 379 GB
 
 **Key Insights**:
-- ✅ **Excellent compression**: 156 bytes/domain with complete certificate data
+- ✅ **Excellent Elasticsearch compression**: 156 bytes/domain with complete certificate data
 - ✅ **High variability**: Daily volumes can fluctuate significantly (200%+ observed)
-- ✅ **Cost-effective**: ~$38/month for 1TB storage covers yearly data
-- ✅ **Scalable**: Schema supports billions of domains efficiently
+- ✅ **Cost-effective**: ~$38/month for 1TB Elasticsearch storage covers yearly data
+- ✅ **Scalable**: Elasticsearch schema supports billions of domains efficiently
 
 ## ⚠️ Limitations
 
