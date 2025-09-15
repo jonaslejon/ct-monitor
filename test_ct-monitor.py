@@ -351,9 +351,18 @@ class TestElasticsearchOutput:
     """Test Elasticsearch output functionality"""
 
     @patch.dict('os.environ', {'ES_HOST': 'http://test:9200', 'ES_USER': 'testuser', 'ES_PASSWORD': 'testpass'})
-    def test_elasticsearch_output_initialization(self):
+    @patch('elasticsearch_output.requests.Session')
+    def test_elasticsearch_output_initialization(self, mock_session_class):
         """Test ElasticsearchOutput constructor with environment variables"""
         from elasticsearch_output import ElasticsearchOutput
+
+        # Mock the session to avoid actual HTTP calls
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
 
         # Test with environment variables
         es = ElasticsearchOutput()
@@ -363,9 +372,18 @@ class TestElasticsearchOutput:
         assert es.index_prefix == "ct-domains"
         assert es.batch_size == 1000
 
-    def test_elasticsearch_output_explicit_params(self):
+    @patch('elasticsearch_output.requests.Session')
+    def test_elasticsearch_output_explicit_params(self, mock_session_class):
         """Test ElasticsearchOutput with explicit parameters"""
         from elasticsearch_output import ElasticsearchOutput
+
+        # Mock the session to avoid actual HTTP calls
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
 
         # Test with explicit parameters
         es = ElasticsearchOutput(
@@ -382,9 +400,19 @@ class TestElasticsearchOutput:
         assert es.index_prefix == "custom-prefix"
         assert es.batch_size == 500
 
-    def test_elasticsearch_session_auth(self):
+    @patch('elasticsearch_output.requests.Session')
+    def test_elasticsearch_session_auth(self, mock_session_class):
         """Test that session authentication is properly configured"""
         from elasticsearch_output import ElasticsearchOutput
+
+        # Mock the session to avoid actual HTTP calls
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_session.headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+        mock_session_class.return_value = mock_session
 
         # Test that session is created with correct auth
         es = ElasticsearchOutput(es_user="test", es_password="pass")
@@ -396,9 +424,18 @@ class TestElasticsearchOutput:
         assert es.session.headers['Content-Type'] == 'application/json'
         assert es.session.headers['Accept'] == 'application/json'
 
-    def test_transform_to_minimal(self):
+    @patch('elasticsearch_output.requests.Session')
+    def test_transform_to_minimal(self, mock_session_class):
         """Test data transformation to minimal format"""
         from elasticsearch_output import ElasticsearchOutput
+
+        # Mock the session to avoid actual HTTP calls
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
 
         es = ElasticsearchOutput()
 
@@ -418,9 +455,18 @@ class TestElasticsearchOutput:
         assert minimal["l"] == "g"  # google log source
         assert minimal["s"] == ["example.com", "www.example.com", "api.example.com"]
 
-    def test_transform_to_minimal_missing_fields(self):
+    @patch('elasticsearch_output.requests.Session')
+    def test_transform_to_minimal_missing_fields(self, mock_session_class):
         """Test transformation with missing fields"""
         from elasticsearch_output import ElasticsearchOutput
+
+        # Mock the session to avoid actual HTTP calls
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
 
         es = ElasticsearchOutput()
 
@@ -435,9 +481,18 @@ class TestElasticsearchOutput:
         assert minimal["l"] == "x"  # default log source
         assert minimal["s"] == []
 
-    def test_get_log_source_code(self):
+    @patch('elasticsearch_output.requests.Session')
+    def test_get_log_source_code(self, mock_session_class):
         """Test log source code extraction"""
         from elasticsearch_output import ElasticsearchOutput
+
+        # Mock the session to avoid actual HTTP calls
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
 
         es = ElasticsearchOutput()
 
@@ -549,11 +604,20 @@ class TestElasticsearchOutput:
         # Verify the request was attempted
         mock_session.post.assert_called()
 
-    def test_get_index_name(self):
+    @patch('elasticsearch_output.requests.Session')
+    def test_get_index_name(self, mock_session_class):
         """Test daily index name generation"""
         from elasticsearch_output import ElasticsearchOutput
         from unittest.mock import patch
         from datetime import datetime
+
+        # Mock the session to avoid actual HTTP calls
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
 
         es = ElasticsearchOutput()
 
