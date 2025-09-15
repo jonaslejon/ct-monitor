@@ -371,11 +371,35 @@ python3 ct-monitor.py -l https://mammoth2025h1.ct.sectigo.com/ -n 100
 - **No deduplication**: Certificates may be stored multiple times if they appear in different CT logs
 
 ### Planned Features
+
+**Core Enhancements**:
 - **Automatic retention policies**: Configurable TTL for certificate data
 - **Index lifecycle management**: Automated index rotation and deletion
 - **Deduplication**: Prevent storing duplicate certificates across logs
 - **Compression optimization**: Further storage efficiency improvements
 - **Cluster support**: Distributed Elasticsearch cluster support
+
+**Security & Verification**:
+- **SCT verification**: Signed Certificate Timestamp validation
+- **Merkle tree proofs**: Log consistency verification
+- **Certificate chain validation**: Full chain of trust validation
+- **Revocation checking**: OCSP and CRL integration
+
+**Advanced Functionality**:
+- **Web interface**: Dashboard for data exploration
+- **Alerting system**: Notifications for specific patterns
+- **API endpoints**: REST API for querying results
+- **Multiple export formats**: CSV, SQLite, Parquet support
+- **Advanced filtering**: By issuer, key type, validity period
+- **Threat intelligence**: Integration with TI feeds
+- **Domain categorization**: Automated domain classification
+
+**Operational Improvements**:
+- **Docker containerization**: Easy deployment
+- **Configuration files**: YAML/JSON config support
+- **Performance metrics**: Prometheus/Grafana integration
+- **Historical backfilling**: Import historical CT data
+- **Subdomain analysis**: Pattern-based subdomain enumeration
 
 ## 📜 License
 
