@@ -1,0 +1,46 @@
+# Docker ignore file for CT Monitor
+
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Python cache and virtual environment
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+venv/
+env/
+.venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs and runtime data
+logs/
+*.log
+
+# Environment files (except example)
+.env
+
+# Test and coverage files
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Distribution and build artifacts
+dist/
+build/
+*.egg-info/
+
+# Documentation
+.DS_Store
+Thumbs.db
+
+# Keep these files
+!.env.example

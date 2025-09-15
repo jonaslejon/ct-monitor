@@ -1,0 +1,69 @@
+# Docker Compose example for CT Monitor with Elasticsearch
+# Copy this file to docker-compose.yml and customize as needed
+
+version: '3.8'
+
+services:
+  # Elasticsearch service for storing CT data
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: ct-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - ct-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # CT Monitor service
+  ct-monitor:
+    build: .
+    container_name: ct-monitor
+    environment:
+      - ES_HOST=http://elasticsearch:9200
+      - ES_USER=elastic
+      - ES_PASSWORD=  # Set your password here
+    volumes:
+      - ./data:/data  # Optional: for persistent data
+      - ./config:/app/config  # Optional: for configuration files
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - ct-network
+    # Example command for continuous monitoring to Elasticsearch
+    command: ["--es-output", "-f", "-n", "1000", "-p", "30"]
+    # Alternative: run with timeout for batch processing
+    # command: ["--es-output", "--timeout", "60", "-n", "5000"]
+
+  # Optional: Kibana for data visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.0
+    container_name: ct-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - ct-network
+
+volumes:
+  elasticsearch_data:
+    driver: local
+
+networks:
+  ct-network:
+    driver: bridge
