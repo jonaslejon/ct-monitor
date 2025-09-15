@@ -363,6 +363,20 @@ python3 ct-monitor.py -m "test" -n 50
 python3 ct-monitor.py -l https://mammoth2025h1.ct.sectigo.com/ -n 100
 ```
 
+## 📋 TODO & Future Enhancements
+
+### Current Limitations
+- **No automatic cleanup**: Older certificate entries are not automatically removed from Elasticsearch
+- **Manual index management**: Users need to manually manage index retention and cleanup
+- **No deduplication**: Certificates may be stored multiple times if they appear in different CT logs
+
+### Planned Features
+- **Automatic retention policies**: Configurable TTL for certificate data
+- **Index lifecycle management**: Automated index rotation and deletion
+- **Deduplication**: Prevent storing duplicate certificates across logs
+- **Compression optimization**: Further storage efficiency improvements
+- **Cluster support**: Distributed Elasticsearch cluster support
+
 ## 📜 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
