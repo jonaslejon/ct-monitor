@@ -77,11 +77,14 @@ class ElasticsearchOutput:
             response.raise_for_status()
             self.logger.info(f"✅ Elasticsearch connection validated: {self.es_host}")
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"❌ Elasticsearch connection failed: {e}")
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.error(f"[{timestamp}] ❌ Elasticsearch connection failed: {e}")
             if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 401:
-                self.logger.error("❌ Authentication failed - check ES_USER and ES_PASSWORD")
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] ❌ Authentication failed - check ES_USER and ES_PASSWORD")
             elif isinstance(e, requests.exceptions.ConnectionError):
-                self.logger.error("❌ Connection failed - check ES_HOST and Elasticsearch status")
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] ❌ Connection failed - check ES_HOST and Elasticsearch status")
             raise SystemExit("Fatal: Elasticsearch connection failed") from e
 
     def _get_index_name(self) -> str:
@@ -138,18 +141,21 @@ class ElasticsearchOutput:
             if response.status_code == 200:
                 result = response.json()
                 if result.get('errors', False):
-                    self.logger.error(f"❌ Elasticsearch bulk errors: {result}")
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self.logger.error(f"[{timestamp}] ❌ Elasticsearch bulk errors: {result}")
                     # Add to retry queue
                     self.failed_batches.append(self.batch.copy())
                 else:
                     self.logger.info(f"✅ Indexed {len(self.batch)} documents to {index_name}")
             else:
-                self.logger.error(f"❌ Elasticsearch error: {response.status_code} - {response.text}")
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] ❌ Elasticsearch error: {response.status_code} - {response.text}")
                 # Add to retry queue
                 self.failed_batches.append(self.batch.copy())
 
         except Exception as e:
-            self.logger.error(f"❌ Failed to send batch to Elasticsearch: {e}")
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.error(f"[{timestamp}] ❌ Failed to send batch to Elasticsearch: {e}")
             # Add to retry queue
             self.failed_batches.append(self.batch.copy())
 

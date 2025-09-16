@@ -378,8 +378,9 @@ class HTTPClient:
             except requests.exceptions.RequestException as e:
                 if not shutdown_event.is_set():
                     retries += 1
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     self.logger.error(
-                        f"❌ Request failed for {url}: {e}, "
+                        f"[{timestamp}] ❌ Request failed for {url}: {e}, "
                         f"retrying ({retries})"
                     )
                     
@@ -427,7 +428,8 @@ class CTLogMonitor:
                 self.es_output_handler = ElasticsearchOutput()
                 self.logger.info("✅ Elasticsearch output initialized")
             except ImportError as e:
-                self.logger.error(f"❌ Failed to initialize Elasticsearch output: {e}")
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] ❌ Failed to initialize Elasticsearch output: {e}")
                 self.es_output = False
         
         # Threading
@@ -517,8 +519,9 @@ class CTLogMonitor:
                 error_msg = str(e)
                 if len(error_msg) > 100:
                     error_msg = error_msg[:100] + "..."
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 self.logger.error(
-                    f"🚫 Certificate parsing error (#{self.stats.get_stats()['errors']}): {error_msg}"
+                    f"[{timestamp}] 🚫 Certificate parsing error (#{self.stats.get_stats()['errors']}): {error_msg}"
                 )
             
             return None
@@ -726,7 +729,8 @@ class CTLogMonitor:
             except queue.Empty:
                 continue
             except Exception as e:
-                self.logger.error(f"⚠️ Worker thread error: {e}")
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] ⚠️ Worker thread error: {e}")
     
     def output_thread(self):
         """Output thread to write results as JSON"""
@@ -758,7 +762,8 @@ class CTLogMonitor:
                         else:
                             self.logger.info(f"{domain_type} {json.dumps(data)} -> ES")
                     except Exception as e:
-                        self.logger.error(f"❌ Failed to send to Elasticsearch: {e}")
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.logger.error(f"[{timestamp}] ❌ Failed to send to Elasticsearch: {e}")
                         # Fallback to stdout
                         self.logger.output(json.dumps(data))
                 else:
@@ -788,7 +793,8 @@ class CTLogMonitor:
             except queue.Empty:
                 continue
             except Exception as e:
-                self.logger.error(f"⚠️ Output thread error: {e}")
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] ⚠️ Output thread error: {e}")
     
     def _get_domain_type_emoji(self, name: str) -> str:
         """Get appropriate emoji for domain type"""
@@ -867,10 +873,12 @@ class CTLogMonitor:
                             self._log_progress(entries_processed, log_url)
                             
                     except Exception as e:
-                        self.logger.error(f"💥 Failed to download entries for {log_url}: index {idx} -> {e}")
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.logger.error(f"[{timestamp}] 💥 Failed to download entries for {log_url}: index {idx} -> {e}")
                         if self.logger.verbose:
                             import traceback
-                            self.logger.error(f"🔍 Full traceback: {traceback.format_exc()}")
+                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            self.logger.error(f"[{timestamp}] 🔍 Full traceback: {traceback.format_exc()}")
                         return
                 
                 if entries_processed > 0:
@@ -886,7 +894,8 @@ class CTLogMonitor:
                     break
                     
         except Exception as e:
-            self.logger.error(f"💀 Failed to monitor log {log_url}: {e}")
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.error(f"[{timestamp}] 💀 Failed to monitor log {log_url}: {e}")
             if self.logger.verbose:
                 import traceback
                 self.logger.error(f"🔍 Full traceback: {traceback.format_exc()}")
@@ -975,19 +984,22 @@ class CTLogMonitor:
                         try:
                             self.es_output_handler.retry_failed_batches()
                         except Exception as e:
-                            self.logger.error(f"❌ Failed to retry ES batches: {e}")
+                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            self.logger.error(f"[{timestamp}] ❌ Failed to retry ES batches: {e}")
                         last_retry_time = current_time
 
                     try:
                         future.result()  # This will raise any exceptions
                     except Exception as e:
                         if not self.shutdown_event.is_set():
-                            self.logger.error(f"💥 Log monitoring error: {e}")
+                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            self.logger.error(f"[{timestamp}] 💥 Log monitoring error: {e}")
             
         except KeyboardInterrupt:
             self.logger.warning("\n🛑 Interrupt received, exiting...", force=True)
         except Exception as e:
-            self.logger.error(f"💀 Fatal error: {e}")
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.error(f"[{timestamp}] 💀 Fatal error: {e}")
             exit_code = 1
         finally:
             # Signal shutdown to all threads and print stats
@@ -999,7 +1011,8 @@ class CTLogMonitor:
                     self.es_output_handler.close()
                     self.logger.info("✅ Elasticsearch connection closed")
                 except Exception as e:
-                    self.logger.error(f"❌ Error closing Elasticsearch connection: {e}")
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self.logger.error(f"[{timestamp}] ❌ Error closing Elasticsearch connection: {e}")
 
             self._print_final_statistics()
         
