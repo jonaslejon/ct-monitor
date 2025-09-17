@@ -404,7 +404,7 @@ class HTTPClient:
                     raise
         
         if shutdown_event.is_set():
-            raise KeyboardInterrupt("Shutdown during download")
+            return {}  # Return empty dict when shutdown is requested
         
     def _interruptible_sleep(self, seconds: float, shutdown_event: threading.Event):
         """Sleep that can be interrupted by shutdown event"""
@@ -414,7 +414,7 @@ class HTTPClient:
 
         for _ in range(total_seconds):
             if shutdown_event.is_set():
-                raise KeyboardInterrupt("Shutdown during sleep")
+                return  # Return early instead of raising exception
             time.sleep(1)
 
         # Sleep remaining fraction if any
@@ -935,7 +935,11 @@ class CTLogMonitor:
                 self.logger.debug(f"📡 Fetching STH from {log_url}")
                 
                 sth = self.get_sth(log_url)
-                tree_size = sth['tree_size']
+                if not sth:  # Empty dict means shutdown was requested
+                    return
+                tree_size = sth.get('tree_size', 0)
+                if tree_size == 0:  # Invalid response
+                    return
                 
                 self.logger.debug(
                     f"📊 Tree size: {tree_size}, Tree head timestamp: {sth.get('timestamp', 'N/A')}"
@@ -1067,7 +1071,8 @@ class CTLogMonitor:
             # Monitor logs
             self.logger.success(f"🚀 Beginning log monitoring with {len(logs)} log(s)")
 
-            with ThreadPoolExecutor(max_workers=len(logs)) as executor:
+            executor = ThreadPoolExecutor(max_workers=len(logs))
+            try:
                 futures = [executor.submit(self.monitor_log, log_url) for log_url in logs]
 
                 # Wait for completion or interruption
@@ -1112,11 +1117,17 @@ class CTLogMonitor:
                     # Cancel all futures on interrupt
                     for f in futures:
                         f.cancel()
-                    raise
+                    # Don't re-raise if we're already shutting down
+                    if not self.shutdown_event.is_set():
+                        raise
+            finally:
+                # Shutdown executor immediately without waiting for tasks to complete
+                executor.shutdown(wait=False)
             
         except KeyboardInterrupt:
             if not self.is_shutting_down:
                 self.is_shutting_down = True
+                self.shutdown_event.set()  # Signal all threads to stop
                 self.logger.warning("\n🛑 Interrupt received, exiting...", force=True)
             else:
                 # Second Ctrl+C - force immediate exit
