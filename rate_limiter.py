@@ -68,7 +68,14 @@ class ServerRateInfo:
         """Record a successful request"""
         now = datetime.now()
         self.last_success = now
-        self.consecutive_failures = 0
+
+        # Only reset consecutive failures if we haven't had a rate limit recently
+        # This prevents successes on one endpoint from resetting failures when
+        # other endpoints of the same server are still being rate limited
+        if self.last_rate_limit is None or (now - self.last_rate_limit).total_seconds() > 60:
+            # No recent rate limits, safe to reset
+            self.consecutive_failures = 0
+        # If we had a rate limit within the last minute, don't reset the counter
 
         # If server was excluded but responded successfully, lift exclusion early
         if self.is_excluded:
@@ -77,16 +84,19 @@ class ServerRateInfo:
             # Keep conservative settings initially after exclusion lift
             self.batch_size = max(self.min_batch_size, self.original_batch_size // 4)
             self.poll_interval_multiplier = 2.0
+            self.consecutive_failures = 0  # Reset on exclusion lift
             return  # Don't apply gradual recovery on exclusion lift
 
-        # Gradually recover: increase batch size and reduce poll multiplier
-        if self.batch_size < self.original_batch_size:
-            # Increase batch size by 25%
-            self.batch_size = min(self.original_batch_size, int(self.batch_size * 1.25))
+        # Only apply gradual recovery if we're truly recovering (no recent rate limits)
+        if self.consecutive_failures == 0:
+            # Gradually recover: increase batch size and reduce poll multiplier
+            if self.batch_size < self.original_batch_size:
+                # Increase batch size by 25%
+                self.batch_size = min(self.original_batch_size, int(self.batch_size * 1.25))
 
-        if self.poll_interval_multiplier > 1.0:
-            # Reduce multiplier by 25%
-            self.poll_interval_multiplier = max(1.0, self.poll_interval_multiplier * 0.75)
+            if self.poll_interval_multiplier > 1.0:
+                # Reduce multiplier by 25%
+                self.poll_interval_multiplier = max(1.0, self.poll_interval_multiplier * 0.75)
 
     def is_currently_excluded(self) -> bool:
         """Check if server is currently excluded"""
@@ -156,23 +166,17 @@ class AdaptiveRateLimiter:
         self.lock = threading.Lock()
 
     def get_server_info(self, server_url: str) -> ServerRateInfo:
-        """Get or create rate info for a server endpoint"""
-        # Use URL up to year/server identifier as key
-        # Handles two URL patterns:
-        # 1. With year in path: https://server.com/2025h2/ct/v1/...
-        # 2. Without year in path (Sectigo): https://sabre2025h2.ct.sectigo.com/ct/v1/...
+        """Get or create rate info for a server (not per endpoint)"""
+        # Track rate limits at the server level, not per year endpoint
+        # This prevents successes on one year endpoint from resetting
+        # failures on another year endpoint of the same server
         if '://' in server_url:
             parts = server_url.split('/')
             server_name = parts[2] if len(parts) > 2 else server_url
 
-            # For Sectigo-style URLs (no year in path), use just the domain
-            # For other URLs with year in path, include the year
-            if len(parts) >= 4 and parts[3] != 'ct':
-                # Has year in path (e.g., /2025h2/)
-                endpoint_key = '/'.join(parts[:4])  # Include up to year part
-            else:
-                # No year in path or goes straight to /ct/
-                endpoint_key = '/'.join(parts[:3])  # Just the domain
+            # Always use just the domain as the key
+            # This ensures all year endpoints share the same rate limit tracking
+            endpoint_key = '/'.join(parts[:3])  # Just https://domain
         else:
             endpoint_key = server_url
             server_name = server_url
