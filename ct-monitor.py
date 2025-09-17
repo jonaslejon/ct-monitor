@@ -366,7 +366,8 @@ class HTTPClient:
                         sleep_time = min(self.poll_time * (2 ** (retries - 1)), 60)
                         self.logger.warning(
                             f"⏳ Rate limited - sleeping for {sleep_time}s ({log_domain}) "
-                            f"- status {response.status_code}"
+                            f"- status {response.status_code}",
+                            force=True  # Show even in quiet mode
                         )
                         
                         self._interruptible_sleep(sleep_time, shutdown_event)
