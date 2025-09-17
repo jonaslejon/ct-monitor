@@ -13,7 +13,7 @@ A powerful Python tool for monitoring Certificate Transparency (CT) logs to extr
 - **🤫 Quiet Mode**: Clean JSON output perfect for automation
 - **🔍 Verbose Mode**: Detailed certificate processing information
 - **📊 Real-time Statistics**: Progress tracking and success rates
-- **⚡ Rate Limit Handling**: Smart exponential backoff for CT log rate limits
+- **⚡ Adaptive Rate Limiting**: Per-server adaptive rate control with circuit breaker pattern
 - **🔄 Follow Mode**: Continuous monitoring for new certificates
 - **🌐 Global Coverage**: Monitors all known CT logs or specific targets
 - **🔍 DNS Resolution**: Resolve discovered domains to IP addresses with caching
@@ -272,6 +272,45 @@ python3 ct-monitor.py -v -n 50
 # Check specific certificate details
 python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/xenon2025/ -n 10
 ```
+
+## ⚡ Adaptive Rate Limiting
+
+### Overview
+
+The CT monitor implements intelligent per-server rate limiting that automatically adapts to each CT log server's behavior:
+
+### Features
+
+- **Per-Server Adaptation**: Each CT log server is tracked independently
+- **Progressive Backoff**: Batch sizes and poll intervals adjust based on server responses
+- **Circuit Breaker**: Temporarily excludes problematic servers after repeated failures
+- **Automatic Recovery**: Gradually restores normal operation when servers become responsive
+
+### How It Works
+
+1. **After 3 rate limits**: Batch size reduced by 50%
+2. **After 5 rate limits**: Poll interval doubled (up to 8x)
+3. **After 10 rate limits**: Server excluded for 30 minutes (circuit breaker)
+4. **On success**: Gradually increases batch size and reduces delays
+
+### Status Indicators
+
+- ✅ Healthy server (no issues)
+- ⚠️ Warning (occasional rate limits)
+- ⛔ Problematic (frequent rate limits)
+- ❌ Severe issues (many failures)
+- 🚫 Excluded (circuit breaker activated)
+
+### Example Output
+
+```
+📊 Rate Limit Status:
+  ⛔ sabre2025h2.ct.sectigo.com: batch=25, delay=4.0x, failures=6
+  🚫 mammoth2026h2.ct.sectigo.com: EXCLUDED until 14:30:00
+  ⚠️ tiger2025h2.ct.sectigo.com: batch=50, delay=2.0x, failures=3
+```
+
+This ensures optimal performance across all servers while respecting their individual rate limits.
 
 ## 🔍 DNS Resolution
 

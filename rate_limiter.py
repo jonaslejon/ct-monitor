@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""
+Adaptive Rate Limiter for CT Log Servers
+
+Implements per-server rate limiting with:
+- Adaptive batch size reduction
+- Dynamic polling interval adjustment
+- Circuit breaker pattern for problematic servers
+- Gradual recovery when servers become responsive
+"""
+
+import time
+from typing import Dict, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+import threading
+
+
+@dataclass
+class ServerRateInfo:
+    """Track rate limiting info per server"""
+    server_name: str
+    rate_limit_count: int = 0
+    last_rate_limit: Optional[datetime] = None
+    last_success: Optional[datetime] = None
+    consecutive_failures: int = 0
+    batch_size: int = 100  # Current batch size for this server
+    poll_interval_multiplier: float = 1.0  # Multiplier for poll interval
+    is_excluded: bool = False
+    exclusion_until: Optional[datetime] = None
+    window_start: datetime = field(default_factory=datetime.now)
+    rate_limits_in_window: list = field(default_factory=list)
+
+    # Configuration
+    original_batch_size: int = 100
+    min_batch_size: int = 10
+    max_poll_multiplier: float = 8.0
+
+    def record_rate_limit(self):
+        """Record a rate limit event"""
+        now = datetime.now()
+        self.rate_limit_count += 1
+        self.consecutive_failures += 1
+        self.last_rate_limit = now
+
+        # Clean old entries from window (keep last hour)
+        cutoff = now - timedelta(hours=1)
+        self.rate_limits_in_window = [t for t in self.rate_limits_in_window if t > cutoff]
+        self.rate_limits_in_window.append(now)
+
+        # Adaptive adjustments based on consecutive failures
+        if self.consecutive_failures >= 3 and self.batch_size > self.min_batch_size:
+            # Reduce batch size by 50%
+            self.batch_size = max(self.min_batch_size, self.batch_size // 2)
+
+        if self.consecutive_failures >= 5:
+            # Double the polling interval
+            self.poll_interval_multiplier = min(self.max_poll_multiplier, self.poll_interval_multiplier * 2)
+
+        if self.consecutive_failures >= 10:
+            # Circuit breaker: exclude server for 30 minutes
+            self.is_excluded = True
+            self.exclusion_until = now + timedelta(minutes=30)
+
+    def record_success(self):
+        """Record a successful request"""
+        now = datetime.now()
+        self.last_success = now
+        self.consecutive_failures = 0
+
+        # Gradually recover: increase batch size and reduce poll multiplier
+        if self.batch_size < self.original_batch_size:
+            # Increase batch size by 25%
+            self.batch_size = min(self.original_batch_size, int(self.batch_size * 1.25))
+
+        if self.poll_interval_multiplier > 1.0:
+            # Reduce multiplier by 25%
+            self.poll_interval_multiplier = max(1.0, self.poll_interval_multiplier * 0.75)
+
+    def is_currently_excluded(self) -> bool:
+        """Check if server is currently excluded"""
+        if not self.is_excluded:
+            return False
+
+        now = datetime.now()
+        if self.exclusion_until and now > self.exclusion_until:
+            # Exclusion period has ended
+            self.is_excluded = False
+            self.exclusion_until = None
+            # Reset some parameters but keep reduced settings initially
+            self.consecutive_failures = 0
+            self.batch_size = max(self.min_batch_size, self.original_batch_size // 4)
+            self.poll_interval_multiplier = 2.0
+            return False
+
+        return True
+
+    def get_rate_limit_score(self) -> float:
+        """Get a score indicating how problematic this server is (0=good, 1=bad)"""
+        now = datetime.now()
+
+        # Count recent rate limits (last hour)
+        recent_count = len(self.rate_limits_in_window)
+
+        # Factor in consecutive failures
+        failure_score = min(1.0, self.consecutive_failures / 10.0)
+
+        # Factor in recent rate limit frequency
+        frequency_score = min(1.0, recent_count / 20.0)  # 20+ rate limits/hour = max score
+
+        # Factor in time since last success
+        if self.last_success:
+            time_since_success = (now - self.last_success).total_seconds()
+            staleness_score = min(1.0, time_since_success / 3600.0)  # 1 hour = max score
+        else:
+            staleness_score = 0.5  # No success recorded yet
+
+        # Weighted average
+        return (failure_score * 0.4 + frequency_score * 0.4 + staleness_score * 0.2)
+
+    def get_status_emoji(self) -> str:
+        """Get emoji indicating server status"""
+        if self.is_currently_excluded():
+            return "🚫"  # Excluded
+
+        score = self.get_rate_limit_score()
+        if score < 0.2:
+            return "✅"  # Healthy
+        elif score < 0.5:
+            return "⚠️"  # Warning
+        elif score < 0.8:
+            return "⛔"  # Problematic
+        else:
+            return "❌"  # Severe issues
+
+
+class AdaptiveRateLimiter:
+    """Manages per-server rate limiting with adaptive behavior"""
+
+    def __init__(self, logger, default_batch_size: int = 100, default_poll_time: int = 10):
+        self.logger = logger
+        self.default_batch_size = default_batch_size
+        self.default_poll_time = default_poll_time
+        self.servers: Dict[str, ServerRateInfo] = {}
+        self.lock = threading.Lock()
+
+    def get_server_info(self, server_url: str) -> ServerRateInfo:
+        """Get or create rate info for a server"""
+        # Extract server name from URL
+        server_name = server_url.split('/')[2] if '/' in server_url else server_url
+
+        with self.lock:
+            if server_name not in self.servers:
+                self.servers[server_name] = ServerRateInfo(
+                    server_name=server_name,
+                    batch_size=self.default_batch_size,
+                    original_batch_size=self.default_batch_size
+                )
+            return self.servers[server_name]
+
+    def record_rate_limit(self, server_url: str, status_code: int):
+        """Record that a server returned a rate limit"""
+        server_info = self.get_server_info(server_url)
+        server_info.record_rate_limit()
+
+        # Log adaptive action taken
+        if server_info.is_excluded:
+            self.logger.warning(
+                f"🚫 Server {server_info.server_name} excluded until "
+                f"{server_info.exclusion_until.strftime('%H:%M:%S')} "
+                f"(too many rate limits)",
+                force=True
+            )
+        elif server_info.consecutive_failures == 3:
+            self.logger.info(
+                f"📉 Reduced batch size to {server_info.batch_size} for {server_info.server_name}"
+            )
+        elif server_info.consecutive_failures == 5:
+            self.logger.info(
+                f"⏰ Increased poll interval {server_info.poll_interval_multiplier:.1f}x "
+                f"for {server_info.server_name}"
+            )
+
+    def record_success(self, server_url: str):
+        """Record a successful request to a server"""
+        server_info = self.get_server_info(server_url)
+        prev_batch = server_info.batch_size
+        prev_multiplier = server_info.poll_interval_multiplier
+
+        server_info.record_success()
+
+        # Log recovery if parameters changed
+        if server_info.batch_size > prev_batch:
+            self.logger.debug(f"📈 Increased batch size to {server_info.batch_size} for {server_info.server_name}")
+        if server_info.poll_interval_multiplier < prev_multiplier:
+            self.logger.debug(f"⚡ Reduced poll delay to {server_info.poll_interval_multiplier:.1f}x for {server_info.server_name}")
+
+    def should_skip_server(self, server_url: str) -> bool:
+        """Check if a server should be skipped due to circuit breaker"""
+        server_info = self.get_server_info(server_url)
+        return server_info.is_currently_excluded()
+
+    def get_batch_size(self, server_url: str) -> int:
+        """Get the current batch size for a server"""
+        server_info = self.get_server_info(server_url)
+        return server_info.batch_size
+
+    def get_poll_interval(self, server_url: str) -> float:
+        """Get the adjusted poll interval for a server"""
+        server_info = self.get_server_info(server_url)
+        return self.default_poll_time * server_info.poll_interval_multiplier
+
+    def get_statistics(self) -> Dict:
+        """Get statistics about rate limiting"""
+        with self.lock:
+            total_servers = len(self.servers)
+            excluded_servers = sum(1 for s in self.servers.values() if s.is_currently_excluded())
+            problematic_servers = sum(1 for s in self.servers.values() if s.get_rate_limit_score() > 0.5)
+
+            return {
+                'total_servers': total_servers,
+                'excluded_servers': excluded_servers,
+                'problematic_servers': problematic_servers,
+                'servers': {
+                    name: {
+                        'status': info.get_status_emoji(),
+                        'rate_limits': info.rate_limit_count,
+                        'consecutive_failures': info.consecutive_failures,
+                        'batch_size': info.batch_size,
+                        'poll_multiplier': info.poll_interval_multiplier,
+                        'excluded': info.is_currently_excluded(),
+                        'score': round(info.get_rate_limit_score(), 2)
+                    }
+                    for name, info in self.servers.items()
+                }
+            }
+
+    def get_summary(self) -> str:
+        """Get a summary of problematic servers"""
+        with self.lock:
+            problematic = [(name, info) for name, info in self.servers.items()
+                          if info.get_rate_limit_score() > 0.3]
+
+            if not problematic:
+                return ""
+
+            # Sort by score (worst first)
+            problematic.sort(key=lambda x: x[1].get_rate_limit_score(), reverse=True)
+
+            lines = ["📊 Rate Limit Status:"]
+            for name, info in problematic[:5]:  # Show top 5
+                status = info.get_status_emoji()
+                if info.is_currently_excluded():
+                    lines.append(f"  {status} {name}: EXCLUDED until {info.exclusion_until.strftime('%H:%M:%S')}")
+                else:
+                    lines.append(
+                        f"  {status} {name}: batch={info.batch_size}, "
+                        f"delay={info.poll_interval_multiplier:.1f}x, "
+                        f"failures={info.consecutive_failures}"
+                    )
+
+            if len(problematic) > 5:
+                lines.append(f"  ... and {len(problematic) - 5} more servers with issues")
+
+            return "\n".join(lines)

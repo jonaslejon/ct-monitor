@@ -341,13 +341,14 @@ class CertificateParser:
 
 class HTTPClient:
     """HTTP client with retry logic and rate limiting"""
-    
-    def __init__(self, logger: Logger, poll_time: int = Config.DEFAULT_POLL_TIME):
+
+    def __init__(self, logger: Logger, poll_time: int = Config.DEFAULT_POLL_TIME, rate_limiter=None):
         self.logger = logger
         self.poll_time = poll_time
         self.session = requests.Session()
         self.session.headers.update({'Accept': 'application/json'})
         self.rate_limited_logs = set()
+        self.rate_limiter = rate_limiter
         
     def download_json(self, url: str, shutdown_event: threading.Event) -> Dict:
         """Download JSON data with retry logic"""
@@ -362,19 +363,30 @@ class HTTPClient:
                         retries += 1
                         log_domain = url.split('/')[2] if '/' in url else url
                         self.rate_limited_logs.add(log_domain)
-                        
-                        sleep_time = min(self.poll_time * (2 ** (retries - 1)), 60)
+
+                        # Record rate limit in adaptive limiter
+                        if self.rate_limiter:
+                            self.rate_limiter.record_rate_limit(url, response.status_code)
+                            sleep_time = self.rate_limiter.get_poll_interval(url)
+                        else:
+                            sleep_time = min(self.poll_time * (2 ** (retries - 1)), 60)
+
                         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         self.logger.warning(
                             f"[{timestamp}] ⏳ Rate limited - sleeping for {sleep_time}s ({log_domain}) "
                             f"- status {response.status_code}",
                             force=True  # Show even in quiet mode
                         )
-                        
+
                         self._interruptible_sleep(sleep_time, shutdown_event)
                         continue
-                
+
                 response.raise_for_status()
+
+                # Record success in adaptive limiter
+                if self.rate_limiter:
+                    self.rate_limiter.record_success(url)
+
                 return response.json()
                 
             except requests.exceptions.RequestException as e:
@@ -426,7 +438,12 @@ class CTLogMonitor:
         # Initialize components
         self.logger = Logger(verbose, quiet)
         self.stats = Statistics()
-        self.http_client = HTTPClient(self.logger, poll_time)
+
+        # Initialize adaptive rate limiter (moved here to be before HTTPClient)
+        from rate_limiter import AdaptiveRateLimiter
+        self.rate_limiter = AdaptiveRateLimiter(self.logger, default_batch_size=tail_count, default_poll_time=poll_time)
+
+        self.http_client = HTTPClient(self.logger, poll_time, rate_limiter=self.rate_limiter)
         self.cert_parser = CertificateParser(self.logger)
 
         # Initialize Elasticsearch output if enabled
@@ -871,23 +888,36 @@ class CTLogMonitor:
 
         self.logger.debug(f"🎯 Starting monitor for {log_url}")
 
+        # Check if server is excluded by circuit breaker
+        if self.rate_limiter.should_skip_server(log_url):
+            server_info = self.rate_limiter.get_server_info(log_url)
+            self.logger.warning(
+                f"🚫 Skipping {log_url} - excluded until "
+                f"{server_info.exclusion_until.strftime('%H:%M:%S')} due to excessive rate limiting",
+                force=True
+            )
+            return
+
         # Set current log URL for Elasticsearch output context
         if self.es_output:
             self.current_monitor_log_url = log_url
-        
+
         try:
             while True:
                 if iteration > 0:
+                    # Get adaptive poll interval for this server
+                    poll_interval = self.rate_limiter.get_poll_interval(log_url)
+
                     if self.logger.verbose:
                         self.logger.debug(
-                            f"💤 Iteration {iteration}: Sleeping for {self.poll_time} seconds "
+                            f"💤 Iteration {iteration}: Sleeping for {poll_interval}s "
                             f"({log_url}) at index {start_idx}"
                         )
                     else:
                         self.logger.warning(
-                            f"💤 Sleeping for {self.poll_time} seconds ({log_url}) at index {start_idx}"
+                            f"💤 Sleeping for {poll_interval}s ({log_url}) at index {start_idx}"
                         )
-                    self.http_client._interruptible_sleep(self.poll_time, self.shutdown_event)
+                    self.http_client._interruptible_sleep(poll_interval, self.shutdown_event)
                 
                 # Get current tree head
                 self.logger.debug(f"📡 Fetching STH from {log_url}")
@@ -908,12 +938,15 @@ class CTLogMonitor:
                 
                 # Download entries in batches
                 entries_processed = 0
-                for idx in range(start_idx, tree_size, Config.BATCH_SIZE):
+                # Get adaptive batch size for this server
+                batch_size = self.rate_limiter.get_batch_size(log_url)
+
+                for idx in range(start_idx, tree_size, batch_size):
                     if self.shutdown_event.is_set():
                         self.logger.debug(f"🛑 Shutdown event detected for {log_url}")
                         return
-                        
-                    end_idx = min(idx + Config.BATCH_SIZE - 1, tree_size - 1)
+
+                    end_idx = min(idx + batch_size - 1, tree_size - 1)
                     
                     self.logger.debug(f"📥 Downloading entries {idx}-{end_idx} from {log_url}")
                     
@@ -1143,6 +1176,12 @@ class CTLogMonitor:
                 f"(consider using -p with higher value)",
                 force=True
             )
+
+        # Show adaptive rate limiting status
+        rate_summary = self.rate_limiter.get_summary()
+        if rate_summary:
+            self.logger.info("", force=True)  # Empty line
+            self.logger.info(rate_summary, force=True)
 
 
 def main():
