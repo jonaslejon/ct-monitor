@@ -155,18 +155,22 @@ class AdaptiveRateLimiter:
 
     def get_server_info(self, server_url: str) -> ServerRateInfo:
         """Get or create rate info for a server endpoint"""
-        # Use URL up to year part as key to track each endpoint
-        # This ensures /2025h2/ and /2026h1/ are tracked independently
-        # but get-sth and get-entries for same year share the same rate limit tracking
+        # Use URL up to year/server identifier as key
+        # Handles two URL patterns:
+        # 1. With year in path: https://server.com/2025h2/ct/v1/...
+        # 2. Without year in path (Sectigo): https://sabre2025h2.ct.sectigo.com/ct/v1/...
         if '://' in server_url:
-            # Parse out the path up to year part to get unique endpoint
             parts = server_url.split('/')
-            if len(parts) >= 4:  # https://server.com/year/...
-                endpoint_key = '/'.join(parts[:4])  # Include up to year part only
-                server_name = parts[2]  # Just the domain for display
+            server_name = parts[2] if len(parts) > 2 else server_url
+
+            # For Sectigo-style URLs (no year in path), use just the domain
+            # For other URLs with year in path, include the year
+            if len(parts) >= 4 and parts[3] != 'ct':
+                # Has year in path (e.g., /2025h2/)
+                endpoint_key = '/'.join(parts[:4])  # Include up to year part
             else:
-                endpoint_key = server_url
-                server_name = parts[2] if len(parts) > 2 else server_url
+                # No year in path or goes straight to /ct/
+                endpoint_key = '/'.join(parts[:3])  # Just the domain
         else:
             endpoint_key = server_url
             server_name = server_url
@@ -196,7 +200,20 @@ class AdaptiveRateLimiter:
 
         # Log adaptive action taken (only on threshold crossings)
         # Include endpoint info in logs for clarity
-        endpoint_info = f" [{server_url.split('/')[3] if '/' in server_url and len(server_url.split('/')) > 3 else ''}]" if '/' in server_url else ""
+        endpoint_info = ""
+        if '/' in server_url:
+            parts = server_url.split('/')
+            if len(parts) > 3 and parts[3] != 'ct':
+                # Has year in path
+                endpoint_info = f" [{parts[3]}]"
+            elif 'sectigo' in server_url.lower():
+                # Sectigo-style with year in subdomain
+                if '2025h2' in parts[2]:
+                    endpoint_info = " [2025h2]"
+                elif '2026h1' in parts[2]:
+                    endpoint_info = " [2026h1]"
+                elif '2026h2' in parts[2]:
+                    endpoint_info = " [2026h2]"
 
         if server_info.is_excluded and prev_failures < 10:
             self.logger.warning(
@@ -227,7 +244,20 @@ class AdaptiveRateLimiter:
         server_info.record_success()
 
         # Log recovery if parameters changed
-        endpoint_info = f" [{server_url.split('/')[3] if '/' in server_url and len(server_url.split('/')) > 3 else ''}]" if '/' in server_url else ""
+        endpoint_info = ""
+        if '/' in server_url:
+            parts = server_url.split('/')
+            if len(parts) > 3 and parts[3] != 'ct':
+                # Has year in path
+                endpoint_info = f" [{parts[3]}]"
+            elif 'sectigo' in server_url.lower():
+                # Sectigo-style with year in subdomain
+                if '2025h2' in parts[2]:
+                    endpoint_info = " [2025h2]"
+                elif '2026h1' in parts[2]:
+                    endpoint_info = " [2026h1]"
+                elif '2026h2' in parts[2]:
+                    endpoint_info = " [2026h2]"
 
         # Log exclusion lift
         if was_excluded and not server_info.is_excluded:
