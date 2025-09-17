@@ -16,13 +16,19 @@ A powerful Python tool for monitoring Certificate Transparency (CT) logs to extr
 - **⚡ Rate Limit Handling**: Smart exponential backoff for CT log rate limits
 - **🔄 Follow Mode**: Continuous monitoring for new certificates
 - **🌐 Global Coverage**: Monitors all known CT logs or specific targets
+- **🔍 DNS Resolution**: Resolve discovered domains to IP addresses with caching
+- **🌍 Public DNS Round-Robin**: Distribute queries across 6 major DNS providers
 
 ## 🔧 Installation
 
 ### Prerequisites
 
 ```bash
-pip install requests cryptography publicsuffix2 colorama
+# Core requirements
+pip install requests cryptography publicsuffix2 colorama python-dotenv
+
+# Optional: For DNS resolution feature (recommended)
+pip install dnspython
 ```
 
 ### Clone Repository
@@ -46,6 +52,9 @@ python3 ct-monitor.py -m ".*\.example\.com$" -n 2000
 
 # Continuous monitoring
 python3 ct-monitor.py -f -n 500
+
+# With DNS resolution to Elasticsearch
+python3 ct-monitor.py --es-output --dns-resolve --dns-public -n 1000
 ```
 
 ## 🐳 Docker Usage
@@ -69,6 +78,9 @@ docker run --rm -it jonaslejon/ct-monitor:latest -m ".*\.example\.com$" -n 2000
 
 # Continuous monitoring
 docker run --rm -it jonaslejon/ct-monitor:latest -f -n 500
+
+# With DNS resolution (requires .env file mounted)
+docker run --rm -it -v $(pwd)/.env:/app/.env jonaslejon/ct-monitor:latest --es-output --dns-resolve --dns-public -n 1000
 ```
 
 ### Advanced Examples
@@ -106,6 +118,10 @@ python3 ct-monitor.py --es-output -n 5000
 | `-q, --quiet` | Suppress status messages | False |
 | `--timeout` | Run for specified minutes then exit | None |
 | `--es-output` | Output to Elasticsearch instead of stdout | False |
+| `--dns-resolve` | Enable DNS resolution for discovered domains | False |
+| `--dns-public` | Use public DNS resolvers with round-robin | False |
+| `--dns-workers` | Number of concurrent DNS resolution workers | 20 |
+| `--dns-cache-size` | DNS cache size for deduplication | 10000 |
 
 ## 📊 Output Format
 
@@ -255,6 +271,103 @@ python3 ct-monitor.py -v -n 50
 
 # Check specific certificate details
 python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/xenon2025/ -n 10
+```
+
+## 🔍 DNS Resolution
+
+### Overview
+
+The DNS resolution feature automatically resolves discovered domains to IP addresses, storing the results in Elasticsearch for bidirectional lookups (domain→IP and IP→domain). This is invaluable for security analysis, infrastructure mapping, and threat intelligence.
+
+### Features
+
+- **Async Resolution**: High-performance DNS lookups with configurable concurrency
+- **Smart Caching**: LRU cache prevents redundant queries
+- **SAN Resolution**: Automatically resolves Subject Alternative Names from certificates
+- **Wildcard Expansion**: Expands `*.example.com` to common subdomains (www, mail, api, etc.)
+- **Public DNS Round-Robin**: Distributes queries across 6 major DNS providers to avoid rate limits
+- **Elasticsearch Storage**: Time-based indices with certificate linkage for security analysis
+
+### Public DNS Resolvers
+
+When using `--dns-public`, queries are distributed round-robin across:
+- **Cloudflare**: 1.1.1.1, 1.0.0.1
+- **Google**: 8.8.8.8, 8.8.4.4
+- **Quad9**: 9.9.9.9, 149.112.112.112
+
+### Basic Usage
+
+```bash
+# Enable DNS resolution with system resolver
+python3 ct-monitor.py --es-output --dns-resolve -n 1000
+
+# Use public DNS resolvers with round-robin
+python3 ct-monitor.py --es-output --dns-resolve --dns-public -n 1000
+
+# Customize DNS workers and cache
+python3 ct-monitor.py --es-output --dns-resolve --dns-public --dns-workers 50 --dns-cache-size 20000
+
+# Continuous monitoring with DNS resolution
+python3 ct-monitor.py --es-output --dns-resolve --dns-public -f
+```
+
+### DNS Data in Elasticsearch
+
+DNS results are stored in `ct-dns-YYYY-MM` indices with:
+- **Bidirectional lookups**: Query by domain or IP
+- **Certificate linkage**: Track which certificates use which IPs
+- **Compact storage**: ~50-80 bytes per record with compression
+- **Deduplication**: Hash-based prevention of duplicate entries
+
+### Query Examples
+
+```bash
+# Find all IPs for a domain (using Elasticsearch)
+curl -X GET "localhost:9200/ct-dns-*/_search" -H 'Content-Type: application/json' -d'
+{
+  "query": { "term": { "d": "example.com" } }
+}'
+
+# Find all domains on an IP
+curl -X GET "localhost:9200/ct-dns-*/_search" -H 'Content-Type: application/json' -d'
+{
+  "query": { "term": { "i": "192.168.1.1" } }
+}'
+
+# Find all domains/IPs for a certificate
+curl -X GET "localhost:9200/ct-dns-*/_search" -H 'Content-Type: application/json' -d'
+{
+  "query": { "term": { "c": "cert_sha1_here" } }
+}'
+```
+
+### Performance & Rate Limiting
+
+- **Round-robin distribution** prevents rate limiting from any single DNS provider
+- **Batch processing** groups domains for efficient resolution
+- **Async resolution** enables high throughput (100+ lookups/second)
+- **Cache prevents** redundant queries for recently resolved domains
+
+### Use Cases
+
+**Infrastructure Mapping**:
+```bash
+# Map all infrastructure for an organization
+python3 ct-monitor.py --es-output --dns-resolve --dns-public -m ".*\.company\.com$" -f
+```
+
+**CDN Detection**:
+```bash
+# Identify domains using specific CDNs
+python3 ct-monitor.py --es-output --dns-resolve --dns-public -n 10000
+# Then query Elasticsearch for IPs in Cloudflare ranges (104.x.x.x)
+```
+
+**Security Analysis**:
+```bash
+# Track certificate/IP relationships
+python3 ct-monitor.py --es-output --dns-resolve --dns-public -f
+# Query for certificates that suddenly change IPs
 ```
 
 ## 📊 Elasticsearch Integration
