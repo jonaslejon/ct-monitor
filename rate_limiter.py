@@ -68,6 +68,15 @@ class ServerRateInfo:
         self.last_success = now
         self.consecutive_failures = 0
 
+        # If server was excluded but responded successfully, lift exclusion early
+        if self.is_excluded:
+            self.is_excluded = False
+            self.exclusion_until = None
+            # Keep conservative settings initially after exclusion lift
+            self.batch_size = max(self.min_batch_size, self.original_batch_size // 4)
+            self.poll_interval_multiplier = 2.0
+            return  # Don't apply gradual recovery on exclusion lift
+
         # Gradually recover: increase batch size and reduce poll multiplier
         if self.batch_size < self.original_batch_size:
             # Increase batch size by 25%
@@ -146,14 +155,14 @@ class AdaptiveRateLimiter:
 
     def get_server_info(self, server_url: str) -> ServerRateInfo:
         """Get or create rate info for a server endpoint"""
-        # Use full URL path as key to track each endpoint separately
+        # Use URL up to year part as key to track each endpoint
         # This ensures /2025h2/ and /2026h1/ are tracked independently
-        # but still extract server name for display
+        # but get-sth and get-entries for same year share the same rate limit tracking
         if '://' in server_url:
-            # Parse out the path up to /ct/v1/ to get unique endpoint
+            # Parse out the path up to year part to get unique endpoint
             parts = server_url.split('/')
-            if len(parts) >= 5:  # https://server.com/year/ct/v1/...
-                endpoint_key = '/'.join(parts[:5])  # Include up to year part
+            if len(parts) >= 4:  # https://server.com/year/...
+                endpoint_key = '/'.join(parts[:4])  # Include up to year part only
                 server_name = parts[2]  # Just the domain for display
             else:
                 endpoint_key = server_url
@@ -213,11 +222,19 @@ class AdaptiveRateLimiter:
         server_info = self.get_server_info(server_url)
         prev_batch = server_info.batch_size
         prev_multiplier = server_info.poll_interval_multiplier
+        was_excluded = server_info.is_excluded
 
         server_info.record_success()
 
         # Log recovery if parameters changed
         endpoint_info = f" [{server_url.split('/')[3] if '/' in server_url and len(server_url.split('/')) > 3 else ''}]" if '/' in server_url else ""
+
+        # Log exclusion lift
+        if was_excluded and not server_info.is_excluded:
+            self.logger.info(
+                f"✅ Exclusion lifted for {server_info.server_name}{endpoint_info} - server responding normally",
+                force=True
+            )
 
         if server_info.batch_size > prev_batch:
             self.logger.debug(f"📈 Increased batch size to {server_info.batch_size} for {server_info.server_name}{endpoint_info}")
@@ -267,20 +284,22 @@ class AdaptiveRateLimiter:
     def get_summary(self) -> str:
         """Get a summary of problematic servers"""
         with self.lock:
+            # Include both problematic servers and currently excluded servers
             problematic = [(name, info) for name, info in self.servers.items()
-                          if info.get_rate_limit_score() > 0.3]
+                          if info.get_rate_limit_score() > 0.3 or info.is_currently_excluded()]
 
             if not problematic:
                 return ""
 
-            # Sort by score (worst first)
-            problematic.sort(key=lambda x: x[1].get_rate_limit_score(), reverse=True)
+            # Sort by score (worst first), but put excluded servers first
+            problematic.sort(key=lambda x: (not x[1].is_currently_excluded(), -x[1].get_rate_limit_score()))
 
             lines = ["📊 Rate Limit Status:"]
             for name, info in problematic[:5]:  # Show top 5
                 status = info.get_status_emoji()
                 if info.is_currently_excluded():
-                    lines.append(f"  {status} {name}: EXCLUDED until {info.exclusion_until.strftime('%H:%M:%S')}")
+                    exclusion_time = info.exclusion_until.strftime('%H:%M:%S') if info.exclusion_until else "unknown"
+                    lines.append(f"  {status} {name}: EXCLUDED until {exclusion_time}")
                 else:
                     lines.append(
                         f"  {status} {name}: batch={info.batch_size}, "
