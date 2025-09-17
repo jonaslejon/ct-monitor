@@ -192,11 +192,13 @@ class DNSResolver:
                     self.resolvers.append(resolver)
                 self.logger.info(f"✅ Using public DNS resolvers (round-robin): {', '.join(self.PUBLIC_RESOLVERS)}")
             else:
-                # Use system resolver
+                # Use system resolver - it automatically reads system configuration
                 self.async_resolver = dns.asyncresolver.Resolver()
                 self.async_resolver.timeout = timeout
                 self.async_resolver.lifetime = timeout * 2
-                self.logger.info("✅ Using system DNS resolver (dnspython)")
+                # Log which nameservers are being used (from system config)
+                nameservers = self.async_resolver.nameservers[:3] if self.async_resolver.nameservers else ["system default"]
+                self.logger.info(f"✅ Using system DNS resolver: {', '.join(map(str, nameservers))}")
         else:
             self.logger.warning("⚠️ dnspython not available, using socket resolution")
 
