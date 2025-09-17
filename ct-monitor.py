@@ -617,10 +617,14 @@ class CTLogMonitor:
         for name in names:
             if self.pattern and not self.pattern.search(name):
                 continue
-                
+
             if self.pattern:
                 self.logger.debug(f"🎯 Pattern MATCH: {name} matches {self.pattern.pattern}")
-            
+
+            # Filter out the current domain name from dns_names (SANs)
+            # Only keep SANs that are different from the current domain
+            filtered_dns = [d for d in dns_names if d != name] if dns_names else None
+
             result = CTResult(
                 name=name,
                 timestamp=timestamp,
@@ -628,7 +632,7 @@ class CTLogMonitor:
                 sha1=sha1_hash,
                 emails=emails if emails else None,
                 ips=ips if ips else None,
-                dns=dns_names if dns_names else None
+                dns=filtered_dns if filtered_dns else None  # Only store if there are other SANs
             )
             results.append(result)
         
