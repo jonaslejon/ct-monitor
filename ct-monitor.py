@@ -364,8 +364,9 @@ class HTTPClient:
                         self.rate_limited_logs.add(log_domain)
                         
                         sleep_time = min(self.poll_time * (2 ** (retries - 1)), 60)
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         self.logger.warning(
-                            f"⏳ Rate limited - sleeping for {sleep_time}s ({log_domain}) "
+                            f"[{timestamp}] ⏳ Rate limited - sleeping for {sleep_time}s ({log_domain}) "
                             f"- status {response.status_code}",
                             force=True  # Show even in quiet mode
                         )
@@ -445,17 +446,22 @@ class CTLogMonitor:
         if self.dns_resolve:
             try:
                 from dns_resolver import DNSResolverThread
-                from dns_elasticsearch import DNSElasticsearchStorage
 
-                self.dns_storage = DNSElasticsearchStorage()
+                # Only create Elasticsearch storage if both DNS and ES output are enabled
+                if self.es_output:
+                    from dns_elasticsearch import DNSElasticsearchStorage
+                    self.dns_storage = DNSElasticsearchStorage()
+                    self.logger.info("✅ DNS resolution with Elasticsearch storage enabled")
+                else:
+                    self.logger.info("✅ DNS resolution enabled (without storage)")
+
                 self.dns_resolver_thread = DNSResolverThread(
                     logger=self.logger,
                     batch_size=100,
                     flush_interval=5,
-                    storage=self.dns_storage,
+                    storage=self.dns_storage,  # Will be None if ES not enabled
                     use_public_resolvers=self.dns_public
                 )
-                self.logger.info("✅ DNS resolution enabled")
             except ImportError as e:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 self.logger.error(f"[{timestamp}] ❌ Failed to initialize DNS resolver: {e}")
