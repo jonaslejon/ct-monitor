@@ -9,6 +9,8 @@ Implements per-server rate limiting with:
 - Gradual recovery when servers become responsive
 """
 
+import re
+
 import time
 from typing import Dict, Optional
 from dataclasses import dataclass, field
@@ -200,20 +202,7 @@ class AdaptiveRateLimiter:
 
         # Log adaptive action taken (only on threshold crossings)
         # Include endpoint info in logs for clarity
-        endpoint_info = ""
-        if '/' in server_url:
-            parts = server_url.split('/')
-            if len(parts) > 3 and parts[3] != 'ct':
-                # Has year in path
-                endpoint_info = f" [{parts[3]}]"
-            elif 'sectigo' in server_url.lower():
-                # Sectigo-style with year in subdomain
-                if '2025h2' in parts[2]:
-                    endpoint_info = " [2025h2]"
-                elif '2026h1' in parts[2]:
-                    endpoint_info = " [2026h1]"
-                elif '2026h2' in parts[2]:
-                    endpoint_info = " [2026h2]"
+        endpoint_info = self._extract_endpoint_info(server_url)
 
         if server_info.is_excluded and prev_failures < 10:
             self.logger.warning(
@@ -244,20 +233,7 @@ class AdaptiveRateLimiter:
         server_info.record_success()
 
         # Log recovery if parameters changed
-        endpoint_info = ""
-        if '/' in server_url:
-            parts = server_url.split('/')
-            if len(parts) > 3 and parts[3] != 'ct':
-                # Has year in path
-                endpoint_info = f" [{parts[3]}]"
-            elif 'sectigo' in server_url.lower():
-                # Sectigo-style with year in subdomain
-                if '2025h2' in parts[2]:
-                    endpoint_info = " [2025h2]"
-                elif '2026h1' in parts[2]:
-                    endpoint_info = " [2026h1]"
-                elif '2026h2' in parts[2]:
-                    endpoint_info = " [2026h2]"
+        endpoint_info = self._extract_endpoint_info(server_url)
 
         # Log exclusion lift
         if was_excluded and not server_info.is_excluded:
@@ -341,3 +317,22 @@ class AdaptiveRateLimiter:
                 lines.append(f"  ... and {len(problematic) - 5} more servers with issues")
 
             return "\n".join(lines)
+
+    def _extract_endpoint_info(self, server_url: str) -> str:
+        """Extract year/period identifier from URL for logging"""
+        # Pattern to match year and period like 2024h1, 2025h2, 2026h1, etc.
+        year_pattern = r'(\d{4}h[12])'
+
+        # Search in the entire URL (could be in path or subdomain)
+        match = re.search(year_pattern, server_url.lower())
+        if match:
+            return f" [{match.group(1).upper()}]"
+
+        # If no year pattern found, try to extract any path segment that looks like a log identifier
+        if '/' in server_url:
+            parts = server_url.split('/')
+            # Check if there's a path segment after the domain that's not 'ct'
+            if len(parts) > 3 and parts[3] != 'ct' and parts[3] != '':
+                return f" [{parts[3]}]"
+
+        return ""
