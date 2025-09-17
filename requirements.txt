@@ -17,3 +17,7 @@ colorama>=0.4.4
 # Standard library typing support for older Python versions
 typing-extensions>=4.0.0;python_version<"3.8"
 python-dotenv
+
+# Optional: DNS resolution support
+# Uncomment if you want to use the --dns-resolve feature
+# dnspython>=2.4.0

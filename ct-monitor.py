@@ -407,7 +407,9 @@ class CTLogMonitor:
     def __init__(self, log_url: Optional[str] = None, tail_count: int = Config.DEFAULT_TAIL_COUNT,
                  poll_time: int = Config.DEFAULT_POLL_TIME, follow: bool = False,
                  pattern: Optional[str] = None, verbose: bool = False, quiet: bool = False,
-                 es_output: bool = False, timeout_minutes: Optional[int] = None):
+                 es_output: bool = False, timeout_minutes: Optional[int] = None,
+                 dns_resolve: bool = False, dns_workers: int = 20, dns_cache_size: int = 10000,
+                 dns_public: bool = False):
         self.log_url = log_url
         self.tail_count = tail_count
         self.poll_time = poll_time
@@ -415,6 +417,10 @@ class CTLogMonitor:
         self.pattern = re.compile(pattern) if pattern else None
         self.es_output = es_output
         self.timeout_minutes = timeout_minutes
+        self.dns_resolve = dns_resolve
+        self.dns_workers = dns_workers
+        self.dns_cache_size = dns_cache_size
+        self.dns_public = dns_public
 
         # Initialize components
         self.logger = Logger(verbose, quiet)
@@ -432,7 +438,29 @@ class CTLogMonitor:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 self.logger.error(f"[{timestamp}] ❌ Failed to initialize Elasticsearch output: {e}")
                 self.es_output = False
-        
+
+        # Initialize DNS resolver if enabled
+        self.dns_resolver_thread = None
+        self.dns_storage = None
+        if self.dns_resolve:
+            try:
+                from dns_resolver import DNSResolverThread
+                from dns_elasticsearch import DNSElasticsearchStorage
+
+                self.dns_storage = DNSElasticsearchStorage()
+                self.dns_resolver_thread = DNSResolverThread(
+                    logger=self.logger,
+                    batch_size=100,
+                    flush_interval=5,
+                    storage=self.dns_storage,
+                    use_public_resolvers=self.dns_public
+                )
+                self.logger.info("✅ DNS resolution enabled")
+            except ImportError as e:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] ❌ Failed to initialize DNS resolver: {e}")
+                self.dns_resolve = False
+
         # Threading
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
@@ -756,6 +784,20 @@ class CTLogMonitor:
                 # Print with color coding and better formatting
                 current_time = time.time()
 
+                # Add to DNS resolution queue if enabled
+                if self.dns_resolve and self.dns_resolver_thread:
+                    # Queue domain and SANs for resolution
+                    cert_sha1 = data.get('sha1')
+
+                    # Add main domain
+                    self.dns_resolver_thread.add_domain(result.name, cert_sha1)
+
+                    # Add SANs if present
+                    if result.dns:
+                        for san_domain in result.dns:
+                            if san_domain != result.name:  # Skip if same as main domain
+                                self.dns_resolver_thread.add_domain(san_domain, cert_sha1)
+
                 # Send to Elasticsearch if enabled, otherwise output to stdout
                 if self.es_output:
                     try:
@@ -1010,6 +1052,24 @@ class CTLogMonitor:
             # Signal shutdown to all threads and print stats
             self.shutdown_event.set()
 
+            # Clean up DNS resolver if enabled
+            if self.dns_resolve:
+                if self.dns_resolver_thread:
+                    try:
+                        self.dns_resolver_thread.close()
+                        self.logger.info("✅ DNS resolver closed")
+                    except Exception as e:
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.logger.error(f"[{timestamp}] ❌ Error closing DNS resolver: {e}")
+
+                if self.dns_storage:
+                    try:
+                        self.dns_storage.close()
+                        self.logger.info("✅ DNS storage closed")
+                    except Exception as e:
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.logger.error(f"[{timestamp}] ❌ Error closing DNS storage: {e}")
+
             # Clean up Elasticsearch connection if enabled
             if self.es_output and hasattr(self, 'es_output_handler'):
                 try:
@@ -1104,7 +1164,15 @@ def main():
                        help='Run for specified minutes then exit (useful for testing)')
     parser.add_argument('--es-output', action='store_true',
                        help='Output to Elasticsearch instead of stdout')
-    
+    parser.add_argument('--dns-resolve', action='store_true',
+                       help='Enable DNS resolution for discovered domains')
+    parser.add_argument('--dns-workers', type=int, default=20,
+                       help='Number of concurrent DNS resolution workers (default: 20)')
+    parser.add_argument('--dns-cache-size', type=int, default=10000,
+                       help='DNS cache size (default: 10000)')
+    parser.add_argument('--dns-public', action='store_true',
+                       help='Use public DNS resolvers (1.1.1.1, 8.8.8.8, etc.) with round-robin')
+
     args = parser.parse_args()
     
     # Validate conflicting options
@@ -1139,6 +1207,10 @@ def main():
 
         if args.es_output:
             logger.info("📊 Elasticsearch output enabled - sending to ES instead of stdout")
+
+        if args.dns_resolve:
+            resolver_info = "public resolvers" if args.dns_public else "system resolver"
+            logger.info(f"🔍 DNS resolution enabled - {args.dns_workers} workers, cache: {args.dns_cache_size}, using {resolver_info}")
     
     monitor = CTLogMonitor(
         log_url=args.log_url,
@@ -1149,7 +1221,11 @@ def main():
         verbose=args.verbose,
         quiet=args.quiet,
         es_output=args.es_output,
-        timeout_minutes=args.timeout
+        timeout_minutes=args.timeout,
+        dns_resolve=args.dns_resolve,
+        dns_workers=args.dns_workers,
+        dns_cache_size=args.dns_cache_size,
+        dns_public=args.dns_public
     )
     
     return monitor.run()
