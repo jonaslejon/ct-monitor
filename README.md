@@ -288,6 +288,48 @@ The DNS resolution feature automatically resolves discovered domains to IP addre
 - **Public DNS Round-Robin**: Distributes queries across 6 major DNS providers to avoid rate limits
 - **Elasticsearch Storage**: Time-based indices with certificate linkage for security analysis
 
+### Local DNS Resolver (Unbound/BIND)
+
+#### systemd-resolved Detection
+
+The tool automatically detects if you're using systemd-resolved (common on Ubuntu/Debian):
+
+```bash
+# If /etc/resolv.conf shows nameserver 127.0.0.53
+python3 ct-monitor.py --dns-resolve --es-output
+# Output: "✅ Using systemd-resolved stub resolver at 127.0.0.53"
+```
+
+With systemd-resolved, DNS queries follow this path:
+`ct-monitor → systemd-resolved (127.0.0.53) → upstream resolver (unbound/etc)`
+
+#### Bypassing systemd-resolved
+
+To use unbound or another local resolver directly:
+
+```bash
+# Force DNS resolution through local unbound resolver
+export DNS_LOCAL_RESOLVER=127.0.0.1
+python3 ct-monitor.py --dns-resolve --es-output
+
+# The tool will show: "🔧 Forcing DNS resolver to: 127.0.0.1"
+```
+
+This ensures all DNS queries go directly to your specified resolver, bypassing systemd-resolved.
+
+#### Verifying DNS Query Flow
+
+```bash
+# Check systemd-resolved statistics
+systemd-resolve --statistics
+
+# Check unbound statistics (if using unbound)
+sudo unbound-control stats | grep -E "total.num.queries"
+
+# Monitor DNS queries in real-time
+sudo tcpdump -ni any port 53
+```
+
 ### Public DNS Resolvers
 
 When using `--dns-public`, queries are distributed round-robin across:

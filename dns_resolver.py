@@ -154,7 +154,8 @@ class DNSResolver:
                  timeout: float = 2.0,
                  cache_size: int = 10000,
                  cache_ttl: int = 300,
-                 use_public_resolvers: bool = False):
+                 use_public_resolvers: bool = False,
+                 force_local_resolver: str = None):
 
         self.logger = logger
         self.max_concurrent = max_concurrent
@@ -194,11 +195,25 @@ class DNSResolver:
             else:
                 # Use system resolver - it automatically reads system configuration
                 self.async_resolver = dns.asyncresolver.Resolver()
+
+                # Check for forced local resolver (for unbound/local DNS)
+                if force_local_resolver:
+                    self.async_resolver.nameservers = [force_local_resolver]
+                    self.logger.info(f"✅ Forcing local DNS resolver: {force_local_resolver}")
+
                 self.async_resolver.timeout = timeout
                 self.async_resolver.lifetime = timeout * 2
+
                 # Log which nameservers are being used (from system config)
                 nameservers = self.async_resolver.nameservers[:3] if self.async_resolver.nameservers else ["system default"]
-                self.logger.info(f"✅ Using system DNS resolver: {', '.join(map(str, nameservers))}")
+
+                # Detect systemd-resolved
+                if nameservers and nameservers[0] == '127.0.0.53':
+                    self.logger.info(f"✅ Using systemd-resolved stub resolver at 127.0.0.53")
+                    self.logger.info("   ℹ️  DNS queries go through systemd-resolved → upstream resolver")
+                    self.logger.info("   💡 To bypass: export DNS_LOCAL_RESOLVER=127.0.0.1")
+                else:
+                    self.logger.info(f"✅ Using system DNS resolver: {', '.join(map(str, nameservers))}")
         else:
             self.logger.warning("⚠️ dnspython not installed - using fallback socket resolution")
             self.logger.warning("   Install dnspython for proper DNS resolver support: pip install dnspython")
@@ -295,6 +310,10 @@ class DNSResolver:
                 resolver = self.get_next_resolver()
 
                 # Use async DNS resolution
+                # Debug log the actual nameserver being used
+                if not self.use_public_resolvers:
+                    self.logger.debug(f"Resolving {domain} using nameserver: {resolver.nameservers[0]}:{resolver.port}")
+
                 answers = await resolver.resolve(domain, 'A')
                 ips = [str(rdata) for rdata in answers]
                 ttl = answers.response.answer[0].ttl if answers.response.answer else 3600
@@ -421,14 +440,17 @@ class DNSResolverThread:
                  batch_size: int = 100,
                  flush_interval: int = 5,
                  storage=None,
-                 use_public_resolvers: bool = False):
+                 use_public_resolvers: bool = False,
+                 force_local_resolver: str = None):
 
         self.logger = logger
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         self.storage = storage
 
-        self.resolver = DNSResolver(logger, use_public_resolvers=use_public_resolvers)
+        self.resolver = DNSResolver(logger,
+                                   use_public_resolvers=use_public_resolvers,
+                                   force_local_resolver=force_local_resolver)
         self.queue: deque = deque()
         self.queue_lock = Lock()
         self.last_flush = time.time()

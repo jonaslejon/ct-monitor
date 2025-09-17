@@ -455,12 +455,18 @@ class CTLogMonitor:
                 else:
                     self.logger.info("✅ DNS resolution enabled (without storage)")
 
+                # Check for forced local resolver (e.g., for unbound on 127.0.0.1)
+                force_local_resolver = os.getenv('DNS_LOCAL_RESOLVER')
+                if force_local_resolver:
+                    self.logger.info(f"🔧 Forcing DNS resolver to: {force_local_resolver}")
+
                 self.dns_resolver_thread = DNSResolverThread(
                     logger=self.logger,
                     batch_size=100,
                     flush_interval=5,
                     storage=self.dns_storage,  # Will be None if ES not enabled
-                    use_public_resolvers=self.dns_public
+                    use_public_resolvers=self.dns_public,
+                    force_local_resolver=force_local_resolver
                 )
             except ImportError as e:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
