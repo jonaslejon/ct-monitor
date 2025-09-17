@@ -18,6 +18,5 @@ colorama>=0.4.4
 typing-extensions>=4.0.0;python_version<"3.8"
 python-dotenv
 
-# Optional: DNS resolution support
-# Uncomment if you want to use the --dns-resolve feature
-# dnspython>=2.4.0
+# DNS resolution support (required for --dns-resolve feature)
+dnspython>=2.4.0

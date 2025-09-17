@@ -200,7 +200,8 @@ class DNSResolver:
                 nameservers = self.async_resolver.nameservers[:3] if self.async_resolver.nameservers else ["system default"]
                 self.logger.info(f"✅ Using system DNS resolver: {', '.join(map(str, nameservers))}")
         else:
-            self.logger.warning("⚠️ dnspython not available, using socket resolution")
+            self.logger.warning("⚠️ dnspython not installed - using fallback socket resolution")
+            self.logger.warning("   Install dnspython for proper DNS resolver support: pip install dnspython")
 
     def get_next_resolver(self):
         """Get next resolver in round-robin fashion"""
@@ -336,9 +337,15 @@ class DNSResolver:
             return result
 
     def _socket_resolve(self, domain: str) -> List[str]:
-        """Fallback socket-based resolution"""
+        """Fallback socket-based resolution
+
+        Note: This method uses the system's resolver through socket.getaddrinfo()
+        For proper DNS resolver usage (respecting /etc/resolv.conf), install dnspython
+        """
         try:
-            result = socket.getaddrinfo(domain, None, socket.AF_UNSPEC)
+            # socket.getaddrinfo uses the system resolver (via glibc)
+            # This should respect /etc/resolv.conf and nsswitch.conf
+            result = socket.getaddrinfo(domain, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
             ips = list(set([addr[4][0] for addr in result]))
             return ips
         except:
