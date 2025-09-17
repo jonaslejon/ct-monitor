@@ -145,40 +145,67 @@ class AdaptiveRateLimiter:
         self.lock = threading.Lock()
 
     def get_server_info(self, server_url: str) -> ServerRateInfo:
-        """Get or create rate info for a server"""
-        # Extract server name from URL
-        server_name = server_url.split('/')[2] if '/' in server_url else server_url
+        """Get or create rate info for a server endpoint"""
+        # Use full URL path as key to track each endpoint separately
+        # This ensures /2025h2/ and /2026h1/ are tracked independently
+        # but still extract server name for display
+        if '://' in server_url:
+            # Parse out the path up to /ct/v1/ to get unique endpoint
+            parts = server_url.split('/')
+            if len(parts) >= 5:  # https://server.com/year/ct/v1/...
+                endpoint_key = '/'.join(parts[:5])  # Include up to year part
+                server_name = parts[2]  # Just the domain for display
+            else:
+                endpoint_key = server_url
+                server_name = parts[2] if len(parts) > 2 else server_url
+        else:
+            endpoint_key = server_url
+            server_name = server_url
 
         with self.lock:
-            if server_name not in self.servers:
-                self.servers[server_name] = ServerRateInfo(
+            if endpoint_key not in self.servers:
+                self.servers[endpoint_key] = ServerRateInfo(
                     server_name=server_name,
                     batch_size=self.default_batch_size,
                     original_batch_size=self.default_batch_size
                 )
-            return self.servers[server_name]
+            return self.servers[endpoint_key]
 
     def record_rate_limit(self, server_url: str, status_code: int):
         """Record that a server returned a rate limit"""
         server_info = self.get_server_info(server_url)
+        prev_failures = server_info.consecutive_failures
         server_info.record_rate_limit()
 
-        # Log adaptive action taken
-        if server_info.is_excluded:
+        # Debug logging
+        self.logger.debug(
+            f"Rate limit recorded for {server_info.server_name}: "
+            f"consecutive_failures={server_info.consecutive_failures}, "
+            f"batch_size={server_info.batch_size}, "
+            f"poll_multiplier={server_info.poll_interval_multiplier:.1f}x"
+        )
+
+        # Log adaptive action taken (only on threshold crossings)
+        # Include endpoint info in logs for clarity
+        endpoint_info = f" [{server_url.split('/')[3] if '/' in server_url and len(server_url.split('/')) > 3 else ''}]" if '/' in server_url else ""
+
+        if server_info.is_excluded and prev_failures < 10:
             self.logger.warning(
-                f"🚫 Server {server_info.server_name} excluded until "
+                f"🚫 Server {server_info.server_name}{endpoint_info} excluded until "
                 f"{server_info.exclusion_until.strftime('%H:%M:%S')} "
-                f"(too many rate limits)",
+                f"(hit {server_info.consecutive_failures} consecutive rate limits)",
                 force=True
             )
-        elif server_info.consecutive_failures == 3:
+        elif server_info.consecutive_failures == 3 and prev_failures < 3:
             self.logger.info(
-                f"📉 Reduced batch size to {server_info.batch_size} for {server_info.server_name}"
+                f"📉 Reduced batch size to {server_info.batch_size} for {server_info.server_name}{endpoint_info}",
+                force=True
             )
-        elif server_info.consecutive_failures == 5:
+        elif server_info.consecutive_failures == 5 and prev_failures < 5:
             self.logger.info(
                 f"⏰ Increased poll interval {server_info.poll_interval_multiplier:.1f}x "
-                f"for {server_info.server_name}"
+                f"for {server_info.server_name}{endpoint_info}",
+                force=True
             )
 
     def record_success(self, server_url: str):
@@ -190,10 +217,12 @@ class AdaptiveRateLimiter:
         server_info.record_success()
 
         # Log recovery if parameters changed
+        endpoint_info = f" [{server_url.split('/')[3] if '/' in server_url and len(server_url.split('/')) > 3 else ''}]" if '/' in server_url else ""
+
         if server_info.batch_size > prev_batch:
-            self.logger.debug(f"📈 Increased batch size to {server_info.batch_size} for {server_info.server_name}")
+            self.logger.debug(f"📈 Increased batch size to {server_info.batch_size} for {server_info.server_name}{endpoint_info}")
         if server_info.poll_interval_multiplier < prev_multiplier:
-            self.logger.debug(f"⚡ Reduced poll delay to {server_info.poll_interval_multiplier:.1f}x for {server_info.server_name}")
+            self.logger.debug(f"⚡ Reduced poll delay to {server_info.poll_interval_multiplier:.1f}x for {server_info.server_name}{endpoint_info}")
 
     def should_skip_server(self, server_url: str) -> bool:
         """Check if a server should be skipped due to circuit breaker"""
