@@ -36,7 +36,7 @@ import sys
 import time
 import threading
 import queue
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from datetime import datetime
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, field
@@ -406,12 +406,20 @@ class HTTPClient:
         if shutdown_event.is_set():
             raise KeyboardInterrupt("Shutdown during download")
         
-    def _interruptible_sleep(self, seconds: int, shutdown_event: threading.Event):
+    def _interruptible_sleep(self, seconds: float, shutdown_event: threading.Event):
         """Sleep that can be interrupted by shutdown event"""
-        for _ in range(seconds):
+        # Handle float seconds properly
+        total_seconds = int(seconds)
+        remaining = seconds - total_seconds
+
+        for _ in range(total_seconds):
             if shutdown_event.is_set():
                 raise KeyboardInterrupt("Shutdown during sleep")
             time.sleep(1)
+
+        # Sleep remaining fraction if any
+        if remaining > 0 and not shutdown_event.is_set():
+            time.sleep(remaining)
 
 
 class CTLogMonitor:
@@ -903,7 +911,7 @@ class CTLogMonitor:
             self.current_monitor_log_url = log_url
 
         try:
-            while True:
+            while not self.shutdown_event.is_set():
                 if iteration > 0:
                     # Get adaptive poll interval for this server
                     poll_interval = self.rate_limiter.get_poll_interval(log_url)
@@ -1060,33 +1068,47 @@ class CTLogMonitor:
 
                 # Wait for completion or interruption
                 last_retry_time = time.time()
-                for future in as_completed(futures):
-                    if self.shutdown_event.is_set():
-                        break
+                try:
+                    for future in as_completed(futures):
+                        if self.shutdown_event.is_set():
+                            # Cancel remaining futures
+                            for f in futures:
+                                f.cancel()
+                            break
 
-                    # Check timeout if specified
-                    if self.timeout_minutes and time.time() - self.start_time >= timeout_seconds:
-                        self.logger.info(f"⏰ Timeout reached after {self.timeout_minutes} minutes, shutting down...")
-                        self.shutdown_event.set()
-                        break
+                        # Check timeout if specified
+                        if self.timeout_minutes and time.time() - self.start_time >= timeout_seconds:
+                            self.logger.info(f"⏰ Timeout reached after {self.timeout_minutes} minutes, shutting down...")
+                            self.shutdown_event.set()
+                            # Cancel remaining futures
+                            for f in futures:
+                                f.cancel()
+                            break
 
-                    # Periodically retry failed Elasticsearch batches (every 30 seconds)
-                    current_time = time.time()
-                    if (self.es_output and hasattr(self, 'es_output_handler') and
-                        current_time - last_retry_time >= 30):
+                        # Periodically retry failed Elasticsearch batches (every 30 seconds)
+                        current_time = time.time()
+                        if (self.es_output and hasattr(self, 'es_output_handler') and
+                            current_time - last_retry_time >= 30):
+                            try:
+                                self.es_output_handler.retry_failed_batches()
+                            except Exception as e:
+                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                self.logger.error(f"[{timestamp}] ❌ Failed to retry ES batches: {e}")
+                            last_retry_time = current_time
+
                         try:
-                            self.es_output_handler.retry_failed_batches()
+                            future.result(timeout=0.5)  # Check result with timeout
+                        except TimeoutError:
+                            continue  # Future not done yet, check shutdown again
                         except Exception as e:
-                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            self.logger.error(f"[{timestamp}] ❌ Failed to retry ES batches: {e}")
-                        last_retry_time = current_time
-
-                    try:
-                        future.result()  # This will raise any exceptions
-                    except Exception as e:
-                        if not self.shutdown_event.is_set():
-                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            self.logger.error(f"[{timestamp}] 💥 Log monitoring error: {e}")
+                            if not self.shutdown_event.is_set():
+                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                self.logger.error(f"[{timestamp}] 💥 Log monitoring error: {e}")
+                except KeyboardInterrupt:
+                    # Cancel all futures on interrupt
+                    for f in futures:
+                        f.cancel()
+                    raise
             
         except KeyboardInterrupt:
             if not self.is_shutting_down:
