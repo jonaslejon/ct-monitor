@@ -355,7 +355,7 @@ python3 ct-monitor.py --es-output --dns-resolve --dns-public -f
 
 ### DNS Data in Elasticsearch
 
-DNS results are stored in `ct-dns-YYYY-MM` indices with:
+DNS results are stored in daily `ct-dns-YYYY-MM-DD` indices with:
 - **Bidirectional lookups**: Query by domain or IP
 - **Certificate linkage**: Track which certificates use which IPs
 - **Compact storage**: ~50-80 bytes per record with compression

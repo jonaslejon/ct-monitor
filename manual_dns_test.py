@@ -5,6 +5,11 @@ Test public DNS resolver round-robin functionality
 
 import asyncio
 import logging
+import pytest
+
+# Skip entire module if pytest-asyncio is not installed
+pytest_asyncio = pytest.importorskip("pytest_asyncio", reason="pytest-asyncio required for async tests")
+
 from dns_resolver import DNSResolver
 
 # Setup logging
@@ -14,7 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
+@pytest.mark.asyncio
 async def test_round_robin():
     """Test round-robin DNS resolution with public resolvers"""
     print("\n=== Testing Round-Robin Public DNS Resolvers ===\n")
@@ -56,6 +61,7 @@ async def test_round_robin():
     print(f"Failed: {stats['failed']}")
 
 
+@pytest.mark.asyncio
 async def test_parallel_resolution():
     """Test parallel resolution to see round-robin in action"""
     print("\n=== Testing Parallel Resolution with Round-Robin ===\n")
@@ -92,6 +98,7 @@ async def test_parallel_resolution():
             print(f"  {dns_server:16} [{bar:20}] {count:3} queries ({percentage:.1f}%)")
 
 
+@pytest.mark.asyncio
 async def test_comparison():
     """Compare system resolver vs public resolvers"""
     print("\n=== Comparing System vs Public Resolvers ===\n")

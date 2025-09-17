@@ -95,8 +95,8 @@ class DNSElasticsearchStorage:
             self.logger.error(f"❌ Error creating index template: {e}")
 
     def get_current_index(self) -> str:
-        """Get current index name based on date"""
-        return f"{self.index_prefix}-{datetime.now().strftime('%Y-%m')}"
+        """Get current index name based on date (daily)"""
+        return f"{self.index_prefix}-{datetime.now().strftime('%Y-%m-%d')}"
 
     def add_result(self, result: DNSResult):
         """Add a DNS resolution result to batch"""
