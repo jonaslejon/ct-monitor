@@ -911,7 +911,11 @@ class CTLogMonitor:
             self.current_monitor_log_url = log_url
 
         try:
-            while not self.shutdown_event.is_set():
+            while True:
+                # Check shutdown at start of loop
+                if self.shutdown_event.is_set():
+                    self.logger.debug(f"🛑 Shutdown event detected for {log_url}")
+                    return
                 if iteration > 0:
                     # Get adaptive poll interval for this server
                     poll_interval = self.rate_limiter.get_poll_interval(log_url)
