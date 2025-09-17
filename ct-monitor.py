@@ -477,7 +477,8 @@ class CTLogMonitor:
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.shutdown_event = threading.Event()
-        
+        self.is_shutting_down = False  # Track if we're already shutting down
+
         # Initialize public suffix list
         self.psl = publicsuffix2.PublicSuffixList()
     
@@ -1055,7 +1056,13 @@ class CTLogMonitor:
                             self.logger.error(f"[{timestamp}] 💥 Log monitoring error: {e}")
             
         except KeyboardInterrupt:
-            self.logger.warning("\n🛑 Interrupt received, exiting...", force=True)
+            if not self.is_shutting_down:
+                self.is_shutting_down = True
+                self.logger.warning("\n🛑 Interrupt received, exiting...", force=True)
+            else:
+                # Second Ctrl+C - force immediate exit
+                self.logger.warning("\n⚠️ Force exit requested", force=True)
+                os._exit(1)
         except Exception as e:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.logger.error(f"[{timestamp}] 💀 Fatal error: {e}")
@@ -1063,6 +1070,7 @@ class CTLogMonitor:
         finally:
             # Signal shutdown to all threads and print stats
             self.shutdown_event.set()
+            self.is_shutting_down = True
 
             # Clean up DNS resolver if enabled
             if self.dns_resolve:

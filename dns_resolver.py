@@ -459,9 +459,13 @@ class DNSResolverThread:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.loop = None
         self.running = False
+        self.shutting_down = False
 
     def add_domain(self, domain: str, cert_sha1: Optional[str] = None):
         """Add domain to resolution queue"""
+        if self.shutting_down:
+            return  # Don't accept new domains during shutdown
+
         with self.queue_lock:
             self.queue.append((domain, cert_sha1))
 
@@ -524,19 +528,39 @@ class DNSResolverThread:
 
     def close(self):
         """Cleanup resources"""
+        # Mark as shutting down to prevent new domains
+        self.shutting_down = True
+
         # Process any remaining domains
         with self.queue_lock:
             if self.queue:
-                self._trigger_flush()
+                # Only trigger flush if we have a small number of domains
+                # Don't block on shutdown for large queues
+                if len(self.queue) < 100:
+                    self._trigger_flush()
+                else:
+                    self.logger.info(f"Skipping {len(self.queue)} pending DNS resolutions on shutdown")
 
-        # Wait for processing to complete
-        time.sleep(2)
+        # Wait briefly for processing to complete (non-blocking)
+        # Use a shorter timeout on shutdown
+        time.sleep(0.5)
 
         # Final flush of storage
         if self.storage:
-            self.storage.flush()
+            try:
+                self.storage.flush()
+            except:
+                pass  # Ignore errors during shutdown
 
-        # Shutdown executor
-        self.executor.shutdown(wait=True)
+        # Shutdown executor with timeout
+        try:
+            self.executor.shutdown(wait=True, timeout=1.0)
+        except:
+            # Force shutdown if it takes too long
+            self.executor.shutdown(wait=False)
+
         if self.loop:
-            self.loop.close()
+            try:
+                self.loop.close()
+            except:
+                pass  # Ignore if already closed
