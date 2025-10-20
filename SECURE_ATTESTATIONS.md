@@ -26,9 +26,14 @@ For local development with attestations:
 # Make the build script executable
 chmod +x build-with-attestations.sh
 
-# Build with attestations
+# Build with attestations (loads locally)
 ./build-with-attestations.sh
+
+# Build and push directly to Docker Hub
+./build-with-attestations.sh --push
 ```
+
+**Note**: Without the `--push` flag, images are loaded locally. With `--push`, images are pushed directly to Docker Hub.
 
 ## GitHub Actions Workflow
 
