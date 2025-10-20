@@ -4,7 +4,7 @@
 set -e
 
 # Get version from the Python file
-VERSION=$(python -c "import re; print(re.search(r\"__version__ = ['\"]([^'\"]+)['\"]\", open('ct-monitor.py').read()).group(1))")
+VERSION=$(python3 -c "import re; print(re.search(r\"__version__ = ['\\\"]([^'\\\"]+)['\\\"]\", open('ct-monitor.py').read()).group(1))")
 
 # Build with attestations
 echo "Building CT Monitor v$VERSION with secure attestations..."
