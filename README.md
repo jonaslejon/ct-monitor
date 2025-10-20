@@ -9,7 +9,7 @@ A powerful Python tool for monitoring Certificate Transparency (CT) logs to extr
 ## 🌟 Features
 
 - **🚀 Multi-threaded Processing**: Concurrent monitoring of multiple CT logs
-- **🎯 Pattern Matching**: Regex filtering for targeted domain discovery  
+- **🎯 Pattern Matching**: Regex filtering for targeted domain discovery
 - **🤫 Quiet Mode**: Clean JSON output perfect for automation
 - **🔍 Verbose Mode**: Detailed certificate processing information
 - **📊 Real-time Statistics**: Progress tracking and success rates
@@ -18,6 +18,7 @@ A powerful Python tool for monitoring Certificate Transparency (CT) logs to extr
 - **🌐 Global Coverage**: Monitors all known CT logs or specific targets
 - **🔍 DNS Resolution**: Resolve discovered domains to IP addresses with caching
 - **🌍 Public DNS Round-Robin**: Distribute queries across 6 major DNS providers
+- **💾 Elasticsearch Storage**: Direct output to Elasticsearch with time-based indices and automatic retry
 
 ## 🔧 Installation
 
