@@ -8,7 +8,7 @@ import asyncio
 import socket
 import hashlib
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 from collections import deque, OrderedDict
 from datetime import datetime, timedelta
 import logging
@@ -164,7 +164,6 @@ class DNSResolver:
 
         # Caching
         self.cache = LRUCache(cache_size, cache_ttl)
-        self.resolved_domains: Set[str] = set()  # Track resolved domains
 
         # Round-robin resolver index
         self.resolver_index = 0
@@ -435,25 +434,32 @@ class DNSResolver:
 class DNSResolverThread:
     """Thread-based wrapper for DNS resolution"""
 
+    # Maximum queue size to prevent memory leaks (default 100k domains ~ 15MB)
+    DEFAULT_MAX_QUEUE_SIZE = 100000
+
     def __init__(self,
                  logger: logging.Logger,
                  batch_size: int = 100,
                  flush_interval: int = 5,
                  storage=None,
                  use_public_resolvers: bool = False,
-                 force_local_resolver: str = None):
+                 force_local_resolver: str = None,
+                 max_queue_size: int = None):
 
         self.logger = logger
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         self.storage = storage
+        self.max_queue_size = max_queue_size or self.DEFAULT_MAX_QUEUE_SIZE
 
         self.resolver = DNSResolver(logger,
                                    use_public_resolvers=use_public_resolvers,
                                    force_local_resolver=force_local_resolver)
-        self.queue: deque = deque()
+        self.queue: deque = deque(maxlen=self.max_queue_size)
         self.queue_lock = Lock()
         self.last_flush = time.time()
+        self.last_stats_log = time.time()
+        self.dropped_domains = 0  # Track domains dropped due to queue overflow
 
         # Background thread
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -467,13 +473,26 @@ class DNSResolverThread:
             return  # Don't accept new domains during shutdown
 
         with self.queue_lock:
+            # Track if queue is at capacity (deque with maxlen drops oldest)
+            was_full = len(self.queue) >= self.max_queue_size
             self.queue.append((domain, cert_sha1))
+            if was_full:
+                self.dropped_domains += 1
 
             # Trigger flush if batch is full or enough time has passed
             current_time = time.time()
             if len(self.queue) >= self.batch_size or (current_time - self.last_flush) >= self.flush_interval:
                 self._trigger_flush()
                 self.last_flush = current_time
+
+            # Log queue stats periodically (every 60 seconds)
+            if current_time - self.last_stats_log >= 60:
+                queue_size = len(self.queue)
+                if queue_size > 1000 or self.dropped_domains > 0:
+                    self.logger.warning(
+                        f"DNS queue: {queue_size:,} pending, {self.dropped_domains:,} dropped"
+                    )
+                self.last_stats_log = current_time
 
     def _trigger_flush(self):
         """Trigger batch resolution"""
@@ -482,29 +501,35 @@ class DNSResolverThread:
             self.executor.submit(self._run_batch_resolution)
 
     def _run_batch_resolution(self):
-        """Run batch resolution in thread"""
+        """Run batch resolution in thread - processes continuously while queue has work"""
         try:
-            # Get batch
-            with self.queue_lock:
-                batch = []
-                for _ in range(min(self.batch_size, len(self.queue))):
-                    if self.queue:
-                        batch.append(self.queue.popleft())
+            # Create event loop once for this processing session
+            try:
+                self.loop = asyncio.get_event_loop()
+            except RuntimeError:
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
 
-            if batch:
-                # Create or get event loop
-                try:
-                    self.loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    self.loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(self.loop)
+            # Process batches continuously while queue has work
+            while not self.shutting_down:
+                # Get batch
+                with self.queue_lock:
+                    if len(self.queue) == 0:
+                        break  # No more work
+                    batch = []
+                    for _ in range(min(self.batch_size, len(self.queue))):
+                        if self.queue:
+                            batch.append(self.queue.popleft())
+
+                if not batch:
+                    break
 
                 # Run async resolution
                 results = self.loop.run_until_complete(
                     self.resolver.resolve_batch(batch)
                 )
 
-                # Process results (would send to Elasticsearch here)
+                # Process results (send to Elasticsearch)
                 self._process_results(results)
 
         finally:
@@ -525,6 +550,16 @@ class DNSResolverThread:
         # Flush storage if configured
         if self.storage:
             self.storage.flush()
+
+    def get_queue_stats(self) -> Dict:
+        """Get queue statistics"""
+        with self.queue_lock:
+            return {
+                "queue_size": len(self.queue),
+                "max_queue_size": self.max_queue_size,
+                "dropped_domains": self.dropped_domains,
+                "resolver_stats": self.resolver.get_stats()
+            }
 
     def close(self):
         """Cleanup resources"""
