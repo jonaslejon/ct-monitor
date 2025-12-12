@@ -491,7 +491,8 @@ class CTLogMonitor:
                     flush_interval=5,
                     storage=self.dns_storage,  # Will be None if ES not enabled
                     use_public_resolvers=self.dns_public,
-                    force_local_resolver=force_local_resolver
+                    force_local_resolver=force_local_resolver,
+                    max_concurrent=self.dns_workers  # Pass dns_workers as max_concurrent
                 )
             except ImportError as e:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

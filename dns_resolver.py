@@ -434,8 +434,8 @@ class DNSResolver:
 class DNSResolverThread:
     """Thread-based wrapper for DNS resolution"""
 
-    # Maximum queue size to prevent memory leaks (default 100k domains ~ 15MB)
-    DEFAULT_MAX_QUEUE_SIZE = 100000
+    # Maximum queue size to prevent memory leaks (default 1M domains ~ 150MB)
+    DEFAULT_MAX_QUEUE_SIZE = 1000000
 
     def __init__(self,
                  logger: logging.Logger,
@@ -444,7 +444,8 @@ class DNSResolverThread:
                  storage=None,
                  use_public_resolvers: bool = False,
                  force_local_resolver: str = None,
-                 max_queue_size: int = None):
+                 max_queue_size: int = None,
+                 max_concurrent: int = 50):
 
         self.logger = logger
         self.batch_size = batch_size
@@ -453,6 +454,7 @@ class DNSResolverThread:
         self.max_queue_size = max_queue_size or self.DEFAULT_MAX_QUEUE_SIZE
 
         self.resolver = DNSResolver(logger,
+                                   max_concurrent=max_concurrent,
                                    use_public_resolvers=use_public_resolvers,
                                    force_local_resolver=force_local_resolver)
         self.queue: deque = deque(maxlen=self.max_queue_size)
