@@ -432,26 +432,28 @@ class DNSResolver:
 
 
 class DNSResolverThread:
-    """Thread-based wrapper for DNS resolution"""
+    """Thread-based wrapper for DNS resolution with parallel processing"""
 
     # Maximum queue size to prevent memory leaks (default 1M domains ~ 150MB)
     DEFAULT_MAX_QUEUE_SIZE = 1000000
 
     def __init__(self,
                  logger: logging.Logger,
-                 batch_size: int = 100,
+                 batch_size: int = 500,  # Increased from 100 for better throughput
                  flush_interval: int = 5,
                  storage=None,
                  use_public_resolvers: bool = False,
                  force_local_resolver: str = None,
                  max_queue_size: int = None,
-                 max_concurrent: int = 50):
+                 max_concurrent: int = 100,  # Increased from 50 for more parallelism
+                 num_workers: int = 4):  # Multiple worker threads for parallel batch processing
 
         self.logger = logger
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         self.storage = storage
         self.max_queue_size = max_queue_size or self.DEFAULT_MAX_QUEUE_SIZE
+        self.num_workers = num_workers
 
         self.resolver = DNSResolver(logger,
                                    max_concurrent=max_concurrent,
@@ -463,11 +465,18 @@ class DNSResolverThread:
         self.last_stats_log = time.time()
         self.dropped_domains = 0  # Track domains dropped due to queue overflow
 
-        # Background thread
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # Background thread pool - multiple workers for parallel batch processing
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
+        self.active_workers = 0
+        self.workers_lock = Lock()
         self.loop = None
         self.running = False
         self.shutting_down = False
+
+        # Async storage queue for non-blocking ES writes
+        self.storage_queue: deque = deque(maxlen=50000)  # Buffer for async storage
+        self.storage_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self.storage_running = False
 
     def add_domain(self, domain: str, cert_sha1: Optional[str] = None):
         """Add domain to resolution queue"""
@@ -497,21 +506,49 @@ class DNSResolverThread:
                 self.last_stats_log = current_time
 
     def _trigger_flush(self):
-        """Trigger batch resolution"""
-        if not self.running:
-            self.running = True
-            self.executor.submit(self._run_batch_resolution)
+        """Trigger batch resolution - spawn workers up to num_workers limit"""
+        with self.workers_lock:
+            # Spawn new workers if we have capacity and work to do
+            while self.active_workers < self.num_workers:
+                with self.queue_lock:
+                    if len(self.queue) < self.batch_size and self.active_workers > 0:
+                        break  # Don't spawn more workers for small remaining queues
+                self.active_workers += 1
+                self.executor.submit(self._run_batch_resolution)
+
+        # Also trigger async storage flush if needed
+        self._trigger_storage_flush()
+
+    def _trigger_storage_flush(self):
+        """Trigger async storage flush"""
+        if not self.storage_running and len(self.storage_queue) > 0:
+            self.storage_running = True
+            self.storage_executor.submit(self._run_storage_flush)
+
+    def _run_storage_flush(self):
+        """Flush storage queue to Elasticsearch asynchronously"""
+        try:
+            while not self.shutting_down and self.storage_queue:
+                # Get batch of results to store
+                batch = []
+                for _ in range(min(2000, len(self.storage_queue))):  # ES batch size 2000
+                    if self.storage_queue:
+                        batch.append(self.storage_queue.popleft())
+
+                if batch and self.storage:
+                    for result in batch:
+                        self.storage.add_result(result)
+                    self.storage.flush()
+        finally:
+            self.storage_running = False
 
     def _run_batch_resolution(self):
         """Run batch resolution in thread - processes continuously while queue has work"""
-        try:
-            # Create event loop once for this processing session
-            try:
-                self.loop = asyncio.get_event_loop()
-            except RuntimeError:
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
+        # Create event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
+        try:
             # Process batches continuously while queue has work
             while not self.shutting_down:
                 # Get batch
@@ -527,18 +564,36 @@ class DNSResolverThread:
                     break
 
                 # Run async resolution
-                results = self.loop.run_until_complete(
+                results = loop.run_until_complete(
                     self.resolver.resolve_batch(batch)
                 )
 
-                # Process results (send to Elasticsearch)
-                self._process_results(results)
+                # Queue results for async storage (non-blocking)
+                self._queue_results_for_storage(results)
 
         finally:
-            self.running = False
+            with self.workers_lock:
+                self.active_workers -= 1
+            loop.close()
+
+    def _queue_results_for_storage(self, results: List[DNSResult]):
+        """Queue results for async storage - non-blocking"""
+        for result in results:
+            if result.ips:
+                self.logger.debug(f"Resolved {result.domain} -> {', '.join(result.ips)}")
+            else:
+                self.logger.debug(f"Failed to resolve {result.domain}: {result.error}")
+
+            # Add to storage queue for async processing
+            if self.storage:
+                self.storage_queue.append(result)
+
+        # Trigger async storage if queue is getting large
+        if len(self.storage_queue) >= 1000:
+            self._trigger_storage_flush()
 
     def _process_results(self, results: List[DNSResult]):
-        """Process resolution results"""
+        """Process resolution results (legacy sync method)"""
         for result in results:
             if result.ips:
                 self.logger.debug(f"Resolved {result.domain} -> {', '.join(result.ips)}")
@@ -560,6 +615,8 @@ class DNSResolverThread:
                 "queue_size": len(self.queue),
                 "max_queue_size": self.max_queue_size,
                 "dropped_domains": self.dropped_domains,
+                "active_workers": self.active_workers,
+                "storage_queue_size": len(self.storage_queue),
                 "resolver_stats": self.resolver.get_stats()
             }
 
@@ -573,14 +630,24 @@ class DNSResolverThread:
             if self.queue:
                 # Only trigger flush if we have a small number of domains
                 # Don't block on shutdown for large queues
-                if len(self.queue) < 100:
+                if len(self.queue) < 500:
                     self._trigger_flush()
                 else:
                     self.logger.info(f"Skipping {len(self.queue)} pending DNS resolutions on shutdown")
 
         # Wait briefly for processing to complete (non-blocking)
         # Use a shorter timeout on shutdown
-        time.sleep(0.5)
+        time.sleep(1.0)
+
+        # Flush remaining storage queue
+        if self.storage and self.storage_queue:
+            self.logger.info(f"Flushing {len(self.storage_queue)} remaining storage items...")
+            try:
+                for result in self.storage_queue:
+                    self.storage.add_result(result)
+                self.storage.flush()
+            except:
+                pass  # Ignore errors during shutdown
 
         # Final flush of storage
         if self.storage:
@@ -589,15 +656,14 @@ class DNSResolverThread:
             except:
                 pass  # Ignore errors during shutdown
 
-        # Shutdown executor with timeout
+        # Shutdown executors with timeout
         try:
-            self.executor.shutdown(wait=True, timeout=1.0)
+            self.executor.shutdown(wait=True, timeout=2.0)
         except:
             # Force shutdown if it takes too long
             self.executor.shutdown(wait=False)
 
-        if self.loop:
-            try:
-                self.loop.close()
-            except:
-                pass  # Ignore if already closed
+        try:
+            self.storage_executor.shutdown(wait=True, timeout=2.0)
+        except:
+            self.storage_executor.shutdown(wait=False)

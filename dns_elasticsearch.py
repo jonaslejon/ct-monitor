@@ -25,7 +25,7 @@ class DNSElasticsearchStorage:
                  es_user: Optional[str] = None,
                  es_password: Optional[str] = None,
                  index_prefix: str = "ct-dns",
-                 batch_size: int = 500):
+                 batch_size: int = 2000):  # Increased from 500 for better ES throughput
 
         # Use environment variables or defaults
         self.es_host = (es_host or os.getenv('ES_HOST', 'http://localhost:9200')).rstrip('/')
