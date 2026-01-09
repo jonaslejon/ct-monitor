@@ -483,12 +483,20 @@ class DNSResolverThread:
         if self.shutting_down:
             return  # Don't accept new domains during shutdown
 
+        should_flush = False
+        current_time = time.time()
+        
         with self.queue_lock:
             # Track if queue is at capacity (deque with maxlen drops oldest)
             was_full = len(self.queue) >= self.max_queue_size
             self.queue.append((domain, cert_sha1))
             if was_full:
                 self.dropped_domains += 1
+
+        # Trigger flush outside the lock to avoid blocking
+        if should_flush:
+            self._trigger_flush()
+
 
             # Trigger flush if batch is full or enough time has passed
             current_time = time.time()

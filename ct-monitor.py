@@ -607,7 +607,7 @@ class CTLogMonitor:
                     self.logger.debug(f"🏷️ Common Name: {cn}")
                     if self.is_valid_hostname_or_ip(cn):
                         try:
-                            self.psl.get_tld(cn, strict=False)
+                            # self.psl.get_tld(cn, strict=False)  # DISABLED: was rejecting valid domains
                             names.add(cn)
                             self.logger.debug(f"✅ Added CN: {cn}")
                         except Exception as e:
@@ -626,7 +626,7 @@ class CTLogMonitor:
                     self.logger.debug(f"🌐 SAN #{san_count}: {name}")
                     if self.is_valid_hostname_or_ip(name):
                         try:
-                            self.psl.get_tld(name, strict=False)
+                            # self.psl.get_tld(name, strict=False)  # DISABLED: was rejecting valid domains
                             names.add(name)
                             self.logger.debug(f"✅ Added SAN: {name}")
                         except Exception as e:
@@ -796,6 +796,7 @@ class CTLogMonitor:
                 results = self.process_certificate(entry)
                 for result in results:
                     self.output_queue.put(result)
+                    qs = self.output_queue.qsize()
                     
                 self.input_queue.task_done()
                     
@@ -811,7 +812,14 @@ class CTLogMonitor:
         
         while not self.shutdown_event.is_set():
             try:
-                result = self.output_queue.get(timeout=1)
+                # Use non-blocking get to avoid queue.get() hang bug
+                qs = self.output_queue.qsize()
+                try:
+                    result = self.output_queue.get_nowait()
+                except queue.Empty:
+                    time.sleep(0.1)  # Brief sleep before next iteration
+                    continue
+                # DEBUG: Log that we received an item
                 if result is None:  # Shutdown signal
                     break
                     

@@ -5,6 +5,7 @@ Adaptive Rate Limiter for CT Log Servers
 Implements per-server rate limiting with:
 - Adaptive batch size reduction
 - Dynamic polling interval adjustment
+- Operator-specific baseline polling intervals
 - Circuit breaker pattern for problematic servers
 - Gradual recovery when servers become responsive
 """
@@ -18,24 +19,49 @@ from datetime import datetime, timedelta
 import threading
 
 
+# Operator-specific baseline polling intervals (seconds)
+# Based on research: Cloudflare most permissive, DigiCert most aggressive
+OPERATOR_POLL_INTERVALS = {
+    'cloudflare.com': 60,      # Cloudflare Nimbus - 100 req/10s per IP (permissive)
+    'googleapis.com': 90,      # Google CT logs - moderate limits
+    'ct.sectigo.com': 90,      # Sectigo - moderate limits
+    'letsencrypt.org': 90,     # Let's Encrypt Oak - moderate limits
+    'trustasia.com': 90,       # TrustAsia - moderate limits
+    'digicert.com': 180,       # DigiCert - 2 req/sec per IP (aggressive)
+    'geomys': 90,              # Geomys Tuscolo - moderate
+    'default': 90              # Default for unknown operators
+}
+
+
+def get_operator_poll_interval(server_url: str) -> int:
+    """Determine baseline poll interval based on operator"""
+    url_lower = server_url.lower()
+    for operator, interval in OPERATOR_POLL_INTERVALS.items():
+        if operator != 'default' and operator in url_lower:
+            return interval
+    return OPERATOR_POLL_INTERVALS['default']
+
+
 @dataclass
 class ServerRateInfo:
     """Track rate limiting info per server"""
     server_name: str
+    server_url: str = ""  # Store full URL for operator detection
     rate_limit_count: int = 0
     last_rate_limit: Optional[datetime] = None
     last_success: Optional[datetime] = None
     consecutive_failures: int = 0
-    batch_size: int = 100  # Current batch size for this server
+    batch_size: int = 1000  # Increased default from 100 to 1000
     poll_interval_multiplier: float = 1.0  # Multiplier for poll interval
+    base_poll_interval: int = 90  # Operator-specific baseline
     is_excluded: bool = False
     exclusion_until: Optional[datetime] = None
     window_start: datetime = field(default_factory=datetime.now)
     rate_limits_in_window: list = field(default_factory=list)
 
     # Configuration
-    original_batch_size: int = 100
-    min_batch_size: int = 10
+    original_batch_size: int = 1000  # Increased from 100
+    min_batch_size: int = 50  # Increased from 10
     max_poll_multiplier: float = 8.0
 
     def record_rate_limit(self):
@@ -158,7 +184,7 @@ class ServerRateInfo:
 class AdaptiveRateLimiter:
     """Manages per-server rate limiting with adaptive behavior"""
 
-    def __init__(self, logger, default_batch_size: int = 100, default_poll_time: int = 10):
+    def __init__(self, logger, default_batch_size: int = 1000, default_poll_time: int = 90):
         self.logger = logger
         self.default_batch_size = default_batch_size
         self.default_poll_time = default_poll_time
@@ -183,11 +209,29 @@ class AdaptiveRateLimiter:
 
         with self.lock:
             if endpoint_key not in self.servers:
+                # Determine operator-specific poll interval
+                base_poll = get_operator_poll_interval(server_url)
+
                 self.servers[endpoint_key] = ServerRateInfo(
                     server_name=server_name,
+                    server_url=server_url,
                     batch_size=self.default_batch_size,
-                    original_batch_size=self.default_batch_size
+                    original_batch_size=self.default_batch_size,
+                    base_poll_interval=base_poll
                 )
+
+                # Log operator detection
+                operator_name = 'Unknown'
+                for op in OPERATOR_POLL_INTERVALS.keys():
+                    if op != 'default' and op in server_url.lower():
+                        operator_name = op
+                        break
+
+                self.logger.debug(
+                    f"Initialized {server_name}: operator={operator_name}, "
+                    f"base_poll={base_poll}s, batch_size={self.default_batch_size}"
+                )
+
             return self.servers[endpoint_key]
 
     def record_rate_limit(self, server_url: str, status_code: int):
@@ -262,9 +306,10 @@ class AdaptiveRateLimiter:
         return server_info.batch_size
 
     def get_poll_interval(self, server_url: str) -> float:
-        """Get the adjusted poll interval for a server"""
+        """Get the adjusted poll interval for a server (operator-specific baseline + multiplier)"""
         server_info = self.get_server_info(server_url)
-        return self.default_poll_time * server_info.poll_interval_multiplier
+        # Use operator-specific baseline instead of global default
+        return server_info.base_poll_interval * server_info.poll_interval_multiplier
 
     def get_statistics(self) -> Dict:
         """Get statistics about rate limiting"""
@@ -284,6 +329,7 @@ class AdaptiveRateLimiter:
                         'consecutive_failures': info.consecutive_failures,
                         'batch_size': info.batch_size,
                         'poll_multiplier': info.poll_interval_multiplier,
+                        'base_poll_interval': info.base_poll_interval,
                         'excluded': info.is_currently_excluded(),
                         'score': round(info.get_rate_limit_score(), 2)
                     }
@@ -313,7 +359,7 @@ class AdaptiveRateLimiter:
                 else:
                     lines.append(
                         f"  {status} {name}: batch={info.batch_size}, "
-                        f"delay={info.poll_interval_multiplier:.1f}x, "
+                        f"delay={info.poll_interval_multiplier:.1f}x (base={info.base_poll_interval}s), "
                         f"failures={info.consecutive_failures}"
                     )
 

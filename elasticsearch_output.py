@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 import logging
 import os
 from dotenv import load_dotenv
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
@@ -54,6 +55,12 @@ class ElasticsearchOutput:
         log_level = os.getenv('ES_LOG_LEVEL', 'WARNING')
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(getattr(logging, log_level.upper(), logging.WARNING))
+        
+        # Configure handler to output to stderr for systemd journal
+        if not self.logger.handlers:
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            self.logger.addHandler(handler)
 
         # Validate connection during initialization
         self._validate_connection()
