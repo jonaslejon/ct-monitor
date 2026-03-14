@@ -483,9 +483,8 @@ class DNSResolverThread:
         if self.shutting_down:
             return  # Don't accept new domains during shutdown
 
-        should_flush = False
         current_time = time.time()
-        
+
         with self.queue_lock:
             # Track if queue is at capacity (deque with maxlen drops oldest)
             was_full = len(self.queue) >= self.max_queue_size
@@ -493,25 +492,19 @@ class DNSResolverThread:
             if was_full:
                 self.dropped_domains += 1
 
-        # Trigger flush outside the lock to avoid blocking
-        if should_flush:
+        # Trigger flush if batch is full or enough time has passed
+        if len(self.queue) >= self.batch_size or (current_time - self.last_flush) >= self.flush_interval:
             self._trigger_flush()
+            self.last_flush = current_time
 
-
-            # Trigger flush if batch is full or enough time has passed
-            current_time = time.time()
-            if len(self.queue) >= self.batch_size or (current_time - self.last_flush) >= self.flush_interval:
-                self._trigger_flush()
-                self.last_flush = current_time
-
-            # Log queue stats periodically (every 60 seconds)
-            if current_time - self.last_stats_log >= 60:
-                queue_size = len(self.queue)
-                if queue_size > 1000 or self.dropped_domains > 0:
-                    self.logger.warning(
-                        f"DNS queue: {queue_size:,} pending, {self.dropped_domains:,} dropped"
-                    )
-                self.last_stats_log = current_time
+        # Log queue stats periodically (every 60 seconds)
+        if current_time - self.last_stats_log >= 60:
+            queue_size = len(self.queue)
+            if queue_size > 1000 or self.dropped_domains > 0:
+                self.logger.warning(
+                    f"DNS queue: {queue_size:,} pending, {self.dropped_domains:,} dropped"
+                )
+            self.last_stats_log = current_time
 
     def _trigger_flush(self):
         """Trigger batch resolution - spawn workers up to num_workers limit"""
