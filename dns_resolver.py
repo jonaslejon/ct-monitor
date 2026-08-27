@@ -18,6 +18,21 @@ import ipaddress
 from dataclasses import dataclass, asdict
 from threading import Lock
 import concurrent.futures
+import os as _os
+import sys as _sys
+
+# Public-suffix data for extract_root_domain(). Vendored under ct-monitor/vendor so the system
+# python is untouched (PEP 668 marks it externally managed).
+#
+# ⚠️ `suffix_list_urls=()` is REQUIRED: tldextract's default fetches the suffix list over the
+# network on first use. This process resolves DNS continuously and must not acquire a runtime
+# dependency on a third-party HTTP endpoint; the packaged snapshot is enough here.
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "vendor"))
+try:
+    import tldextract as _tldextract
+    _PSL = _tldextract.TLDExtract(suffix_list_urls=())
+except Exception:  # never let a missing suffix list stop DNS ingestion
+    _PSL = None
 
 try:
     import dns.asyncresolver
@@ -235,10 +250,42 @@ class DNSResolver:
             return resolver
 
     def extract_root_domain(self, domain: str) -> str:
-        """Extract root domain from subdomain"""
+        """Extract the registrable domain (eTLD+1) — the `r` field on every ct-dns doc.
+
+        This used to be `'.'.join(parts[-2:])`, i.e. the last two labels, and that is wrong for
+        every multi-part TLD: `theatertickets.co.uk` was stored with `r="co.uk"`, the public
+        suffix itself rather than the registrable domain.
+
+        ⚠️ WHY IT MATTERS DOWNSTREAM: the backend's /api/v1/ct/dns subdomain query seeks
+        `term r:{domain}` instead of the leading wildcard `d:*.{domain}`, which is ~500-1200x
+        faster. With `r` holding a public suffix, that seek matched NOTHING for multi-part TLDs,
+        so those targets had to keep the wildcard and were measured at ~4.3s each — the last
+        remaining slow shape after backend v1.0.117.
+
+        ⚠️ ICANN SECTION ONLY — do NOT enable `include_psl_private_domains` here, even though the
+        backend does enable it for its own (different) decision. With the private section on,
+        `x.pages.dev` would resolve to `x.pages.dev`, changing `r` for every multi-tenant-hosted
+        host away from the value it has today and splitting old and new documents apart. With
+        ICANN only, `x.pages.dev` -> `pages.dev`, which is exactly what the old last-two-labels
+        rule already produced, so those docs keep their meaning.
+
+        ⚠️ BACKWARD COMPATIBLE BY CONSTRUCTION, which is why this could ship before any backfill:
+        for a two-label registrable domain the answer is unchanged (`sub.example.com` ->
+        `example.com` either way), and two-label is the only shape the backend currently seeks by
+        `r`. The values that change are exactly the ones nothing queries yet.
+        """
+        if _PSL is not None:
+            try:
+                registrable = _PSL(domain).top_domain_under_public_suffix
+                if registrable:
+                    return registrable
+            except Exception:
+                pass
+        # Fallback keeps the historical behaviour when the suffix list cannot answer (e.g. a
+        # bare TLD, or an unparseable name) so this can never return something emptier than
+        # what it replaced.
         parts = domain.split('.')
         if len(parts) >= 2:
-            # Simple extraction - can be enhanced with PSL
             return '.'.join(parts[-2:])
         return domain
 
