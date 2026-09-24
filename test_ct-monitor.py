@@ -513,7 +513,7 @@ class TestElasticsearchOutput:
         mock_session = Mock()
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"items": [{"index": {"status": 201}}]}
+        mock_response.json.return_value = {"items": [{"create": {"status": 201}}, {"create": {"status": 201}}]}
         mock_session.post.return_value = mock_response
         mock_session_class.return_value = mock_session
 
@@ -543,10 +543,11 @@ class TestElasticsearchOutput:
         # Verify bulk API was called
         mock_session.post.assert_called_once()
         args, kwargs = mock_session.post.call_args
-        assert args[0] == "http://localhost:9200/_bulk"
+        assert args[0].startswith("http://localhost:9200/_bulk")
 
-        # Verify batch was cleared
+        # Verify batch was cleared and nothing is queued for retry
         assert len(es.batch) == 0
+        assert es.failed_batches == []
 
     @patch('elasticsearch_output.requests.Session')
     def test_elasticsearch_error_handling(self, mock_session_class):
@@ -636,6 +637,108 @@ def test_module_can_be_imported():
     assert ct_monitor is not None
     assert CTLogMonitor is not None
     assert CTResult is not None
+
+
+class TestElasticsearchDedup:
+    """Duplicate suppression: deterministic _id + op_type=create + per-item results"""
+
+    def _make(self, mock_session_class, **kw):
+        from elasticsearch_output import ElasticsearchOutput
+        mock_session = Mock()
+        ok = Mock(status_code=200)
+        ok.raise_for_status.return_value = None
+        mock_session.get.return_value = ok
+        mock_session_class.return_value = mock_session
+        es = ElasticsearchOutput(batch_size=1000, **kw)
+        es._get_index_name = lambda: "ct-domains-2026-09-24"
+        return es, mock_session
+
+    @staticmethod
+    def _cert(name, sha1="aa" * 20):
+        return {"name": name, "ts": 1789814096582, "sha1": sha1, "dns": [name]}
+
+    def test_doc_id_is_deterministic_and_pair_specific(self):
+        from elasticsearch_output import ElasticsearchOutput
+        a = ElasticsearchOutput.doc_id("example.com", "aa" * 20)
+        assert a == ElasticsearchOutput.doc_id("example.com", "aa" * 20)
+        assert len(a) == 16
+        assert a != ElasticsearchOutput.doc_id("www.example.com", "aa" * 20)
+        assert a != ElasticsearchOutput.doc_id("example.com", "bb" * 20)
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_repeated_pair_is_queued_once(self, mock_session_class):
+        es, _ = self._make(mock_session_class)
+        for _ in range(4):
+            es.add_to_batch(self._cert("example.com"), "https://log.example/")
+        es.add_to_batch(self._cert("www.example.com"), "https://log.example/")
+        assert len(es.batch) == 2
+        assert es.stats['skipped_local'] == 3
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_new_day_index_resets_local_cache(self, mock_session_class):
+        es, _ = self._make(mock_session_class)
+        es.add_to_batch(self._cert("example.com"), "u")
+        es._get_index_name = lambda: "ct-domains-2026-09-25"
+        es.add_to_batch(self._cert("example.com"), "u")
+        assert [e[0] for e in es.batch] == ["ct-domains-2026-09-24", "ct-domains-2026-09-25"]
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_cache_is_bounded(self, mock_session_class):
+        es, _ = self._make(mock_session_class)
+        es.recent_ids_max = 3
+        for i in range(10):
+            es.add_to_batch(self._cert(f"h{i}.example.com"), "u")
+        assert len(es.recent_ids) == 3
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_flush_uses_create_with_id_and_retries_only_retryable(self, mock_session_class):
+        es, session = self._make(mock_session_class)
+        for n in ["a.example", "b.example", "c.example", "d.example"]:
+            es.add_to_batch(self._cert(n), "u")
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"errors": True, "items": [
+            {"create": {"status": 201}},
+            {"create": {"status": 409, "error": {"type": "version_conflict_engine_exception"}}},
+            {"create": {"status": 429, "error": {"type": "es_rejected_execution_exception"}}},
+            {"create": {"status": 400, "error": {"type": "mapper_parsing_exception"}}},
+        ]}
+        session.post.return_value = resp
+        es.flush()
+
+        lines = session.post.call_args.kwargs['data'].strip().split('\n')
+        action = json.loads(lines[0])
+        assert list(action) == ["create"]
+        assert action["create"]["_id"] == es.doc_id("a.example", "aa" * 20)
+        assert action["create"]["_index"] == "ct-domains-2026-09-24"
+        assert es.batch == []
+        assert len(es.failed_batches) == 1
+        assert [e[2]['d'] for e in es.failed_batches[0]] == ["c.example"]
+        assert es.stats['created'] == 1 and es.stats['duplicate_409'] == 1 and es.stats['dropped'] == 1
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_all_duplicates_is_not_a_failure(self, mock_session_class):
+        es, session = self._make(mock_session_class)
+        es.add_to_batch(self._cert("a.example"), "u")
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"errors": True, "items": [{"create": {"status": 409}}]}
+        session.post.return_value = resp
+        es.flush()
+        assert es.failed_batches == []
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_http_error_requeues_whole_batch(self, mock_session_class):
+        es, session = self._make(mock_session_class)
+        es.add_to_batch(self._cert("a.example"), "u")
+        session.post.return_value = Mock(status_code=503, text="unavailable")
+        es.flush()
+        assert len(es.failed_batches) == 1 and es.batch == []
+        # retry path keeps the original index and id
+        ok = Mock(status_code=200)
+        ok.json.return_value = {"errors": False, "items": [{"create": {"status": 201}}]}
+        session.post.return_value = ok
+        es.retry_failed_batches()
+        assert es.failed_batches == []
+        assert es.stats['created'] == 1
 
 
 if __name__ == "__main__":

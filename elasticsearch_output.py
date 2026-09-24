@@ -6,6 +6,8 @@ Sends certificate data to Elasticsearch with minimal storage format
 
 import json
 import requests
+import xxhash
+from collections import OrderedDict
 from datetime import datetime
 from typing import Dict, List, Optional
 import logging
@@ -33,8 +35,23 @@ class ElasticsearchOutput:
         self.index_prefix = index_prefix
         self.batch_size = batch_size
 
-        self.batch: List[Dict] = []
-        self.failed_batches: List[List[Dict]] = []  # Queue for retrying failed batches
+        # Each entry is (index_name, doc_id, doc). The index is fixed when the doc is
+        # queued, so a batch retried after midnight still lands in its own day's index
+        # and its ids still match that day's copies.
+        self.batch: List[tuple] = []
+        self.failed_batches: List[List[tuple]] = []  # Queue for retrying failed batches
+
+        # Duplicate suppression. The same (domain, cert) pair reaches us several times,
+        # a few seconds apart (measured 2026-09-24: ~3.7 identical copies per pair per
+        # day, differing only in `t`). The document _id is derived from the pair and
+        # written with op_type=create, so Elasticsearch keeps the FIRST copy and answers
+        # 409 for the rest. This small LRU of recent ids drops most copies before they
+        # are sent at all; it is an optimisation only, the _id is what guarantees it.
+        self.recent_ids: "OrderedDict[str, None]" = OrderedDict()
+        self.recent_ids_index: Optional[str] = None
+        self.recent_ids_max = int(os.getenv('ES_DEDUP_CACHE_SIZE', '200000'))
+        self.stats = {'queued': 0, 'skipped_local': 0, 'created': 0,
+                      'duplicate_409': 0, 'retried': 0, 'dropped': 0}
         self.session = requests.Session()
         self.session.auth = (self.es_user, self.es_password)
         self.session.headers.update({
@@ -109,64 +126,124 @@ class ElasticsearchOutput:
             "s": ct_result.get('dns', [])             # full SAN list
         }
 
+    @staticmethod
+    def doc_id(domain: str, cert_hash: str) -> str:
+        """Deterministic _id for one (domain, certificate) pair.
+
+        xxh3_64 is a fast non-cryptographic hash (~95 ns vs ~500 ns for sha1). 64 bits
+        is ample here: ids only need to be unique within one daily index (~60M pairs),
+        where a collision is ~1e-4 per day and would cost one dropped row.
+        """
+        return xxhash.xxh3_64_hexdigest(f"{domain}|{cert_hash}")
+
+    def _seen_recently(self, index_name: str, doc_id: str) -> bool:
+        """True if doc_id was already queued for this index; records it otherwise."""
+        if index_name != self.recent_ids_index:
+            # New day, new index: the same pair is stored once per day, as before.
+            self.recent_ids.clear()
+            self.recent_ids_index = index_name
+        if doc_id in self.recent_ids:
+            return True
+        self.recent_ids[doc_id] = None
+        if len(self.recent_ids) > self.recent_ids_max:
+            self.recent_ids.popitem(last=False)
+        return False
+
     def add_to_batch(self, ct_result: Dict, log_url: str):
         """Add result to batch, flush if batch size reached"""
         minimal_data = self.transform_to_minimal(ct_result, log_url)
+        index_name = self._get_index_name()
+        doc_id = self.doc_id(minimal_data['d'], minimal_data['h'])
+        if self._seen_recently(index_name, doc_id):
+            self.stats['skipped_local'] += 1
+            return
+        self.stats['queued'] += 1
 
         # Debug: Log SAN data summary (only in DEBUG mode)
         if self.logger.isEnabledFor(logging.DEBUG) and 's' in minimal_data and minimal_data['s']:
             sample = minimal_data['s'][:3] if len(minimal_data['s']) > 3 else minimal_data['s']
             self.logger.debug(f"SAN: {sample}... ({len(minimal_data['s'])} domains)")
 
-        self.batch.append(minimal_data)
+        self.batch.append((index_name, doc_id, minimal_data))
 
         if len(self.batch) >= self.batch_size:
             self.flush()
 
     def flush(self):
-        """Flush current batch to Elasticsearch"""
+        """Flush current batch to Elasticsearch.
+
+        Uses op_type=create with a deterministic _id, so re-sending a document is
+        harmless: Elasticsearch answers 409 and keeps the original. Results are read
+        PER ITEM - only items that failed with a retryable status (429 / 5xx) are
+        queued again. Previously any item error re-queued the whole batch with plain
+        `index` ops, which re-wrote every document that had already succeeded.
+        """
         if not self.batch:
             return
 
-        index_name = self._get_index_name()
+        batch = self.batch
+        self.batch = []
         bulk_data = []
-
-        for doc in self.batch:
-            # Bulk API format: index operation + document
-            bulk_data.append(json.dumps({"index": {"_index": index_name}}))
+        for index_name, doc_id, doc in batch:
+            bulk_data.append(json.dumps({"create": {"_index": index_name, "_id": doc_id}}))
             bulk_data.append(json.dumps(doc))
-
         bulk_payload = '\n'.join(bulk_data) + '\n'
 
         try:
             response = self.session.post(
-                f"{self.es_host}/_bulk",
+                f"{self.es_host}/_bulk?filter_path=errors,items.*.status,items.*.error.type,items.*.error.reason",
                 data=bulk_payload,
                 timeout=30
             )
-
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('errors', False):
-                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self.logger.error(f"[{timestamp}] ❌ Elasticsearch bulk errors: {result}")
-                    # Add to retry queue
-                    self.failed_batches.append(self.batch.copy())
-                else:
-                    self.logger.info(f"✅ Indexed {len(self.batch)} documents to {index_name}")
-            else:
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                self.logger.error(f"[{timestamp}] ❌ Elasticsearch error: {response.status_code} - {response.text}")
-                # Add to retry queue
-                self.failed_batches.append(self.batch.copy())
-
         except Exception as e:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.logger.error(f"[{timestamp}] ❌ Failed to send batch to Elasticsearch: {e}")
-            # Add to retry queue
-            self.failed_batches.append(self.batch.copy())
+            self.failed_batches.append(batch)
+            return
 
-        self.batch.clear()
+        if response.status_code != 200:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.error(f"[{timestamp}] ❌ Elasticsearch error: {response.status_code} - {response.text[:500]}")
+            self.failed_batches.append(batch)
+            return
+
+        result = response.json()
+        items = result.get('items') or []
+        if len(items) != len(batch):
+            # Cannot map results to documents; resend all (safe: create is idempotent).
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.error(f"[{timestamp}] ❌ Bulk returned {len(items)} items for {len(batch)} docs - retrying batch")
+            self.failed_batches.append(batch)
+            return
+
+        created = duplicates = 0
+        retry, dropped_errors = [], []
+        for entry, item in zip(batch, items):
+            res = next(iter(item.values()))
+            status = res.get('status', 0)
+            if status in (200, 201):
+                created += 1
+            elif status == 409:
+                duplicates += 1
+            elif status == 429 or status >= 500:
+                retry.append(entry)
+            else:
+                dropped_errors.append(res.get('error'))
+
+        self.stats['created'] += created
+        self.stats['duplicate_409'] += duplicates
+        if retry:
+            self.stats['retried'] += len(retry)
+            self.failed_batches.append(retry)
+        if dropped_errors:
+            self.stats['dropped'] += len(dropped_errors)
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.error(f"[{timestamp}] ❌ Dropped {len(dropped_errors)} docs with non-retryable errors, first: {dropped_errors[0]}")
+        self.logger.info(
+            f"✅ Indexed {created} documents to {batch[0][0]} "
+            f"({duplicates} already present, {len(retry)} to retry; "
+            f"skipped locally so far: {self.stats['skipped_local']})"
+        )
 
     def retry_failed_batches(self):
         """Retry sending failed batches"""

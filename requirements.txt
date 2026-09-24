@@ -20,3 +20,6 @@ python-dotenv
 
 # DNS resolution support (required for --dns-resolve feature)
 dnspython>=2.4.0
+
+# Deterministic document ids for de-duplicated ES writes
+xxhash>=3.0
