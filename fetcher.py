@@ -14,11 +14,21 @@ jumping to the head of the log.
 
 import json
 import os
+import random
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional
+
+
+class RateLimited(Exception):
+    """The log answered 429/503/504. Retried with a short, growing backoff; never a hole."""
+
+    def __init__(self, status: int = 429, host: str = ''):
+        super().__init__(f"status {status}")
+        self.status = status
+        self.host = host
 
 
 class RangeFailed(Exception):
@@ -94,7 +104,9 @@ class RangeFetcher:
                  workers: int = 1, range_size: int = 1024, request_size: int = 256,
                  max_retries: int = 5, retry_sleep: float = 5.0,
                  shutdown_event: Optional[threading.Event] = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 backoff_base: float = 2.0, backoff_cap: float = 60.0,
+                 on_rate_limited: Optional[Callable[['RateLimited', float], None]] = None):
         self.get_entries = get_entries
         self.on_entry = on_entry
         self.workers = max(1, int(workers))
@@ -104,17 +116,31 @@ class RangeFetcher:
         self.retry_sleep = retry_sleep
         self.shutdown_event = shutdown_event or threading.Event()
         self.sleep = sleep
+        self.backoff_base = backoff_base
+        self.backoff_cap = backoff_cap
+        self.on_rate_limited = on_rate_limited
 
     def _fetch_range(self, a: int, b: int) -> int:
         """Fetch [a, b). Returns b on success; raises RangeFailed or returns early on shutdown."""
         pos = a
         failures = 0
+        limited = 0
         while pos < b:
             if self.shutdown_event.is_set():
                 return pos
             end = min(pos + self.request_size, b) - 1
             try:
                 entries = self.get_entries(pos, end)
+            except RateLimited as e:
+                # A rate limit is not a failure of this range: back off briefly and retry the
+                # same position, doubling up to the cap, with jitter so ranges do not retry in step.
+                limited += 1
+                delay = min(self.backoff_cap, self.backoff_base * (2 ** (limited - 1)))
+                delay *= random.uniform(0.75, 1.25)
+                if self.on_rate_limited:
+                    self.on_rate_limited(e, delay)
+                self.sleep(delay)
+                continue
             except Exception as e:  # network, bad JSON, error_message: retry the SAME position
                 entries = None
                 last_error = e
@@ -126,6 +152,7 @@ class RangeFetcher:
                 self.sleep(self.retry_sleep)
                 continue
             failures = 0
+            limited = 0
             # Never trust a log to stay inside the requested window.
             entries = entries[:end - pos + 1]
             for entry in entries:

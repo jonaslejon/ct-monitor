@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 
-from fetcher import PositionStore, RangeFetcher
+from fetcher import PositionStore, RangeFetcher, RateLimited
 
 
 class ShortPageLog:
@@ -114,6 +114,39 @@ class TestRangeFetcher(unittest.TestCase):
         cursor = f.fetch(0, 1000)
         self.assertLessEqual(cursor, 400)
         self.assertEqual(sorted(seen)[:cursor], list(range(cursor)))
+
+
+class TestRateLimitBackoff(unittest.TestCase):
+    def test_rate_limits_back_off_growing_to_the_cap_and_never_leave_a_hole(self):
+        state = {'n': 0}
+
+        def limited(a, b):
+            state['n'] += 1
+            if state['n'] <= 8:
+                raise RateLimited(429, 'log.example')
+            return [{'i': i} for i in range(a, b + 1)]
+        sleeps, seen = [], []
+        f = RangeFetcher(limited, lambda e: seen.append(e['i']), request_size=50,
+                         max_retries=2, backoff_base=2, backoff_cap=60, sleep=sleeps.append)
+        self.assertEqual(f.fetch(0, 50), 50)          # 8 rate limits > max_retries: still no RangeFailed
+        self.assertEqual(sorted(seen), list(range(50)))
+        self.assertEqual(len(sleeps), 8)
+        self.assertLess(sleeps[0], 3)                 # 2 s +-25%
+        self.assertLessEqual(max(sleeps), 60 * 1.25)  # capped
+        self.assertGreater(sleeps[5], sleeps[0])      # growing
+
+    def test_backoff_resets_after_a_successful_page(self):
+        calls = {'n': 0}
+
+        def flaky(a, b):
+            calls['n'] += 1
+            if calls['n'] in (1, 3):
+                raise RateLimited()
+            return [{'i': i} for i in range(a, min(b + 1, a + 10))]
+        sleeps = []
+        RangeFetcher(flaky, lambda e: None, request_size=10, sleep=sleeps.append).fetch(0, 30)
+        self.assertEqual(len(sleeps), 2)
+        self.assertLess(max(sleeps), 3)               # both first-level backoffs
 
 
 class TestPositionStore(unittest.TestCase):

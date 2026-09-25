@@ -49,7 +49,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding
 import publicsuffix2
-from fetcher import PositionStore, RangeFetcher
+from fetcher import PositionStore, RangeFetcher, RateLimited
 from colorama import init, Fore, Back, Style
 
 # Disable SSL warnings
@@ -407,6 +407,15 @@ class HTTPClient:
         if shutdown_event.is_set():
             return {}  # Return empty dict when shutdown is requested
         
+    def fetch_json_once(self, url: str) -> Dict:
+        """One request, no retry loop: raises RateLimited on 429/503/504 so the caller decides
+        how long to wait. Used by the gap-free fetcher; download_json keeps its 90 s sleeps."""
+        response = self.session.get(url, timeout=Config.DEFAULT_TIMEOUT, verify=False)
+        if response.status_code in (429, 503, 504):
+            raise RateLimited(response.status_code, url.split('/')[2] if '/' in url else url)
+        response.raise_for_status()
+        return response.json()
+
     def _interruptible_sleep(self, seconds: float, shutdown_event: threading.Event):
         """Sleep that can be interrupted by shutdown event"""
         # Handle float seconds properly
@@ -1080,8 +1089,22 @@ class CTLogMonitor:
         """Monitor one log without gaps: advance by entries RETURNED, fetch ranges in parallel,
         never give up on a log, and resume from the persisted cursor after a restart."""
         workers = self._fetch_workers_for(log_url)
+        def get_entries_once(a: int, b: int) -> List[Dict]:
+            data = self.http_client.fetch_json_once(
+                f"{log_url.rstrip('/')}/ct/v1/get-entries?start={a}&end={b}")
+            if 'error_message' in data:
+                raise Exception(data['error_message'])
+            return data.get('entries', [])
+
+        def on_rate_limited(err: RateLimited, delay: float) -> None:
+            # Same wording as download_json's line, so per-host 429 counts stay comparable.
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.warning(f"[{timestamp}] ⏳ Rate limited - backing off {delay:.1f}s "
+                                f"({err.host}) - status {err.status} (gap-free)", force=True)
+
         fetcher = RangeFetcher(
-            get_entries=lambda a, b: self.get_entries(log_url, a, b),
+            get_entries=get_entries_once,
+            on_rate_limited=on_rate_limited,
             on_entry=self._enqueue_v2,
             workers=workers,
             retry_sleep=self.poll_time / 6,
