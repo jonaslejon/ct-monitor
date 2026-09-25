@@ -49,6 +49,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding
 import publicsuffix2
+from fetcher import PositionStore, RangeFetcher
 from colorama import init, Fore, Back, Style
 
 # Disable SSL warnings
@@ -430,7 +431,9 @@ class CTLogMonitor:
                  pattern: Optional[str] = None, verbose: bool = False, quiet: bool = False,
                  es_output: bool = False, timeout_minutes: Optional[int] = None,
                  dns_resolve: bool = False, dns_workers: int = 20, dns_cache_size: int = 10000,
-                 dns_public: bool = False):
+                 dns_public: bool = False, state_file: Optional[str] = None,
+                 new_fetcher_logs: Optional[str] = None, fetch_workers: Optional[str] = None,
+                 max_backlog: int = 2_000_000):
         self.log_url = log_url
         self.tail_count = tail_count
         self.poll_time = poll_time
@@ -442,6 +445,17 @@ class CTLogMonitor:
         self.dns_workers = dns_workers
         self.dns_cache_size = dns_cache_size
         self.dns_public = dns_public
+        # Gap-free fetching (fetcher.py), enabled per log so it can be rolled out one log at a time.
+        # new_fetcher_logs: comma-separated substrings of log URLs, or "all". Empty = old behaviour.
+        self.new_fetcher_logs = [s.strip() for s in (new_fetcher_logs or '').split(',') if s.strip()]
+        # fetch_workers: "substring=N,substring=N" parallel ranges per log (default 1).
+        self.fetch_workers = {}
+        for item in (fetch_workers or '').split(','):
+            if '=' in item:
+                key, _, value = item.partition('=')
+                self.fetch_workers[key.strip()] = max(1, int(value))
+        self.max_backlog = max_backlog
+        self.position_store = PositionStore(state_file)
 
         # Initialize components
         self.logger = Logger(verbose, quiet)
@@ -901,6 +915,8 @@ class CTLogMonitor:
     
     def monitor_log(self, log_url: str):
         """Monitor a single CT log"""
+        if self._uses_new_fetcher(log_url):
+            return self.monitor_log_v2(log_url)
         iteration = 0
         start_idx = 0
 
@@ -1019,6 +1035,74 @@ class CTLogMonitor:
                 import traceback
                 self.logger.error(f"🔍 Full traceback: {traceback.format_exc()}")
     
+    def _uses_new_fetcher(self, log_url: str) -> bool:
+        if not self.new_fetcher_logs:
+            return False
+        return 'all' in self.new_fetcher_logs or any(s in log_url for s in self.new_fetcher_logs)
+
+    def _fetch_workers_for(self, log_url: str) -> int:
+        for key, n in self.fetch_workers.items():
+            if key in log_url:
+                return n
+        return 1
+
+    def monitor_log_v2(self, log_url: str):
+        """Monitor one log without gaps: advance by entries RETURNED, fetch ranges in parallel,
+        never give up on a log, and resume from the persisted cursor after a restart."""
+        workers = self._fetch_workers_for(log_url)
+        fetcher = RangeFetcher(
+            get_entries=lambda a, b: self.get_entries(log_url, a, b),
+            on_entry=self.input_queue.put,
+            workers=workers,
+            retry_sleep=self.poll_time / 6,
+            shutdown_event=self.shutdown_event,
+            sleep=lambda secs: self.http_client._interruptible_sleep(secs, self.shutdown_event),
+        )
+        cursor = self.position_store.get(log_url)
+        first = True
+        self.logger.warning(f"🧭 Gap-free fetcher for {log_url} (workers={workers}, "
+                            f"saved cursor={cursor})", force=True)
+        while not self.shutdown_event.is_set():
+            try:
+                if not first:
+                    self.http_client._interruptible_sleep(
+                        self.rate_limiter.get_poll_interval(log_url), self.shutdown_event)
+                    if self.shutdown_event.is_set():
+                        break
+                first_pass, first = first, False
+
+                if self.rate_limiter.should_skip_server(log_url):
+                    continue  # excluded for now; check again after the next poll interval
+
+                sth = self.get_sth(log_url)
+                tree_size = (sth or {}).get('tree_size', 0)
+                if not tree_size:
+                    continue
+
+                if first_pass:
+                    if cursor is None or cursor > tree_size:
+                        cursor = max(0, tree_size - self.tail_count)
+                    elif tree_size - cursor > self.max_backlog:
+                        skipped = tree_size - self.max_backlog - cursor
+                        self.logger.warning(
+                            f"⏭️ {log_url}: backlog {tree_size - cursor} exceeds --max-backlog "
+                            f"{self.max_backlog}; skipping {skipped} entries", force=True)
+                        cursor = tree_size - self.max_backlog
+
+                before = cursor
+                cursor = fetcher.fetch(
+                    cursor, tree_size,
+                    on_progress=lambda c: self.position_store.set(log_url, c))
+                self.logger.warning(
+                    f"📍 {log_url} cursor={cursor} head={tree_size} lag={tree_size - cursor} "
+                    f"fetched={cursor - before}", force=True)
+                if not self.follow:
+                    break  # one pass only, like the classic loop without -f
+            except Exception as e:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.error(f"[{timestamp}] 💥 {log_url}: {e}; retrying after the poll interval")
+        self.position_store.flush()
+
     def _log_progress(self, entries_processed: int, log_url: str):
         """Log progress update"""
         self.logger.info(f"📊 Progress: {entries_processed} entries processed from {log_url}")
@@ -1278,6 +1362,16 @@ def main():
                        help='DNS cache size (default: 10000)')
     parser.add_argument('--dns-public', action='store_true',
                        help='Use public DNS resolvers (1.1.1.1, 8.8.8.8, etc.) with round-robin')
+    parser.add_argument('--state-file', metavar='PATH',
+                       help='Persist each log\'s position here and resume from it after a restart')
+    parser.add_argument('--new-fetcher-logs', metavar='SUBSTRINGS',
+                       help='Use the gap-free fetcher for logs whose URL contains any of these '
+                            'comma-separated substrings, or "all"')
+    parser.add_argument('--fetch-workers', metavar='MAP',
+                       help='Parallel ranges per log for the gap-free fetcher, e.g. "argon2026h2=4"')
+    parser.add_argument('--max-backlog', type=int, default=2_000_000,
+                       help='On start, skip ahead if the saved position is further behind than this '
+                            '(default: 2000000)')
 
     args = parser.parse_args()
     
@@ -1331,7 +1425,11 @@ def main():
         dns_resolve=args.dns_resolve,
         dns_workers=args.dns_workers,
         dns_cache_size=args.dns_cache_size,
-        dns_public=args.dns_public
+        dns_public=args.dns_public,
+        state_file=args.state_file,
+        new_fetcher_logs=args.new_fetcher_logs,
+        fetch_workers=args.fetch_workers,
+        max_backlog=args.max_backlog
     )
     
     return monitor.run()

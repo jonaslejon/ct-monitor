@@ -58,6 +58,31 @@ python3 ct-monitor.py -f -n 500
 python3 ct-monitor.py --es-output --dns-resolve --dns-public -n 1000
 ```
 
+## 🧭 Gap-free fetching and resume after restart
+
+Some CT logs return fewer entries per `get-entries` request than asked for (Google's logs return
+roughly 7-30 whatever the request size). The gap-free fetcher always advances by the entries actually
+returned, can fetch several ranges of one log in parallel, never moves its position past a range that
+failed, and can persist each log's position so a restart resumes where it stopped.
+
+It is enabled per log, so it can be rolled out gradually:
+
+```bash
+# Gap-free fetching for one log, 4 parallel ranges, resume from a state file
+python3 ct-monitor.py -f --new-fetcher-logs argon2026h2 --fetch-workers argon2026h2=4 \
+    --state-file state/positions.json
+
+# All logs
+python3 ct-monitor.py -f --new-fetcher-logs all --state-file state/positions.json
+```
+
+| Option | Meaning |
+|---|---|
+| `--new-fetcher-logs` | Comma-separated substrings of log URLs, or `all` |
+| `--fetch-workers` | Parallel ranges per log, e.g. `argon2026h2=4,xenon2026h2=4` (default 1) |
+| `--state-file` | Where to persist each log's position |
+| `--max-backlog` | On start, skip ahead if the saved position is further behind than this (default 2,000,000) |
+
 ## 🐳 Docker Usage
 
 You can also run ct-monitor using the official Docker image from Docker Hub.
