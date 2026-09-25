@@ -582,6 +582,20 @@ class CTLogMonitor:
         self.logger.info(f"📋 Loaded {len(logs)} log servers")
         return logs
     
+    @staticmethod
+    def _precert_from_extra_data(extra_data_b64: str) -> Optional[x509.Certificate]:
+        """The pre_certificate from a precert entry's extra_data, or None."""
+        try:
+            extra = base64.b64decode(extra_data_b64)
+            if len(extra) < 3:
+                return None
+            length = int.from_bytes(extra[0:3], 'big')
+            if length == 0 or len(extra) < 3 + length:
+                return None
+            return x509.load_der_x509_certificate(extra[3:3 + length])
+        except Exception:
+            return None
+
     def parse_certificate_entry(self, entry: Dict) -> Optional[x509.Certificate]:
         """Parse certificate from CT log entry"""
         try:
@@ -589,9 +603,21 @@ class CTLogMonitor:
             self.logger.debug(f"🔬 Parsing certificate entry: {len(leaf_input)} bytes")
             
             entry_type, cert_data, timestamp = self.cert_parser.parse_leaf_input(leaf_input)
+
+            # A precert leaf holds only the TBSCertificate, which does not parse as a certificate,
+            # so every precert used to be dropped (37% of one busy log's entries, measured
+            # 2026-09-25). RFC 6962 puts the full precertificate first in extra_data
+            # (PrecertChainEntry: a 3-byte length, then the DER), which parses normally.
+            # Gated to entries from the gap-free fetcher (marked `_v2`) so it rolls out per log.
+            if (entry_type == EntryType.PRECERT_LOG_ENTRY and entry.get('_v2')
+                    and entry.get('extra_data')):
+                precert = self._precert_from_extra_data(entry['extra_data'])
+                if precert is not None:
+                    return precert
+
             if not cert_data:
                 return None
-                
+
             return self.cert_parser.parse_certificate(cert_data, entry_type)
             
         except Exception as e:
@@ -1046,13 +1072,17 @@ class CTLogMonitor:
                 return n
         return 1
 
+    def _enqueue_v2(self, entry: Dict) -> None:
+        entry['_v2'] = True  # enables precert parsing for this entry (see parse_certificate_entry)
+        self.input_queue.put(entry)
+
     def monitor_log_v2(self, log_url: str):
         """Monitor one log without gaps: advance by entries RETURNED, fetch ranges in parallel,
         never give up on a log, and resume from the persisted cursor after a restart."""
         workers = self._fetch_workers_for(log_url)
         fetcher = RangeFetcher(
             get_entries=lambda a, b: self.get_entries(log_url, a, b),
-            on_entry=self.input_queue.put,
+            on_entry=self._enqueue_v2,
             workers=workers,
             retry_sleep=self.poll_time / 6,
             shutdown_event=self.shutdown_event,
