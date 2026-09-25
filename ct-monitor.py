@@ -1090,11 +1090,14 @@ class CTLogMonitor:
         )
         cursor = self.position_store.get(log_url)
         first = True
+        # Skip the poll sleep while behind, but only after a pass that made progress: a pass that
+        # fetched nothing (a failing range) still sleeps, so an outage cannot become a hot loop.
+        behind = False
         self.logger.warning(f"🧭 Gap-free fetcher for {log_url} (workers={workers}, "
                             f"saved cursor={cursor})", force=True)
         while not self.shutdown_event.is_set():
             try:
-                if not first:
+                if not first and not behind:
                     self.http_client._interruptible_sleep(
                         self.rate_limiter.get_poll_interval(log_url), self.shutdown_event)
                     if self.shutdown_event.is_set():
@@ -1123,6 +1126,8 @@ class CTLogMonitor:
                 cursor = fetcher.fetch(
                     cursor, tree_size,
                     on_progress=lambda c: self.position_store.set(log_url, c))
+                head = self.get_sth(log_url) or {}
+                behind = cursor > before and head.get('tree_size', 0) - cursor > 1000
                 self.logger.warning(
                     f"📍 {log_url} cursor={cursor} head={tree_size} lag={tree_size - cursor} "
                     f"fetched={cursor - before}", force=True)
