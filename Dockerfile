@@ -40,7 +40,7 @@ COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 
 # Copy the application files
-COPY --chown=appuser:appuser ct-monitor.py .
+COPY --chown=appuser:appuser ct-monitor.py fetcher.py rate_limiter.py elasticsearch_output.py dns_resolver.py dns_elasticsearch.py ./
 COPY --chown=appuser:appuser .env.example .
 
 # Make the script executable
