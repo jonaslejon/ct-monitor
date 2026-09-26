@@ -23,3 +23,6 @@ dnspython>=2.4.0
 
 # Deterministic document ids for de-duplicated ES writes
 xxhash>=3.0
+
+# Public-suffix root extraction in dns_resolver.py (vendored under vendor/; it falls back without it)
+tldextract>=5.1
