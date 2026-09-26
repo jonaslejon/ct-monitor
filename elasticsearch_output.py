@@ -47,7 +47,8 @@ class ElasticsearchOutput:
         # written with op_type=create, so Elasticsearch keeps the FIRST copy and answers
         # 409 for the rest. This small LRU of recent ids drops most copies before they
         # are sent at all; it is an optimisation only, the _id is what guarantees it.
-        self.recent_ids: "OrderedDict[str, None]" = OrderedDict()
+        # doc_id -> True once the FINAL certificate was queued, False while only its precert was
+        self.recent_ids: "OrderedDict[str, bool]" = OrderedDict()
         self.recent_ids_index: Optional[str] = None
         self.recent_ids_max = int(os.getenv('ES_DEDUP_CACHE_SIZE', '200000'))
         self.stats = {'queued': 0, 'skipped_local': 0, 'created': 0,
@@ -136,15 +137,21 @@ class ElasticsearchOutput:
         """
         return xxhash.xxh3_64_hexdigest(f"{domain}|{cert_hash}")
 
-    def _seen_recently(self, index_name: str, doc_id: str) -> bool:
-        """True if doc_id was already queued for this index; records it otherwise."""
+    def _seen_recently(self, index_name: str, doc_id: str, final: bool = True) -> bool:
+        """True if doc_id was already queued for this index; records it otherwise.
+
+        A precert is skipped once anything was queued for its issuance; a final certificate is
+        skipped only once a FINAL was queued, so it can still replace a precert queued earlier.
+        """
         if index_name != self.recent_ids_index:
             # New day, new index: the same pair is stored once per day, as before.
             self.recent_ids.clear()
             self.recent_ids_index = index_name
-        if doc_id in self.recent_ids:
+        seen_final = self.recent_ids.get(doc_id)
+        if seen_final is not None and (seen_final or not final):
             return True
-        self.recent_ids[doc_id] = None
+        self.recent_ids[doc_id] = final or bool(seen_final)
+        self.recent_ids.move_to_end(doc_id)
         if len(self.recent_ids) > self.recent_ids_max:
             self.recent_ids.popitem(last=False)
         return False
@@ -153,8 +160,14 @@ class ElasticsearchOutput:
         """Add result to batch, flush if batch size reached"""
         minimal_data = self.transform_to_minimal(ct_result, log_url)
         index_name = self._get_index_name()
-        doc_id = self.doc_id(minimal_data['d'], minimal_data['h'])
-        if self._seen_recently(index_name, doc_id):
+        # One document per ISSUED certificate: key on issuer+serial (`ik`), which a precert and
+        # its final certificate share, so the pair no longer shows as two certificates. A final
+        # certificate is written with `index` so it replaces its precert (and its SHA-1 is the one
+        # a browser is served); a precert uses `create` so it never replaces a final. Docs from
+        # before 2026-09-26 are keyed on the SHA-1 and do not collapse.
+        is_precert = bool(ct_result.get('pc'))
+        doc_id = self.doc_id(minimal_data['d'], ct_result.get('ik') or minimal_data['h'])
+        if self._seen_recently(index_name, doc_id, final=not is_precert):
             self.stats['skipped_local'] += 1
             return
         self.stats['queued'] += 1
@@ -164,7 +177,7 @@ class ElasticsearchOutput:
             sample = minimal_data['s'][:3] if len(minimal_data['s']) > 3 else minimal_data['s']
             self.logger.debug(f"SAN: {sample}... ({len(minimal_data['s'])} domains)")
 
-        self.batch.append((index_name, doc_id, minimal_data))
+        self.batch.append((index_name, doc_id, minimal_data, 'create' if is_precert else 'index'))
 
         if len(self.batch) >= self.batch_size:
             self.flush()
@@ -184,8 +197,8 @@ class ElasticsearchOutput:
         batch = self.batch
         self.batch = []
         bulk_data = []
-        for index_name, doc_id, doc in batch:
-            bulk_data.append(json.dumps({"create": {"_index": index_name, "_id": doc_id}}))
+        for index_name, doc_id, doc, op in batch:
+            bulk_data.append(json.dumps({op: {"_index": index_name, "_id": doc_id}}))
             bulk_data.append(json.dumps(doc))
         bulk_payload = '\n'.join(bulk_data) + '\n'
 
@@ -210,19 +223,21 @@ class ElasticsearchOutput:
         result = response.json()
         items = result.get('items') or []
         if len(items) != len(batch):
-            # Cannot map results to documents; resend all (safe: create is idempotent).
+            # Cannot map results to documents; resend all (safe: create is idempotent, and index rewrites the same content).
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.logger.error(f"[{timestamp}] ❌ Bulk returned {len(items)} items for {len(batch)} docs - retrying batch")
             self.failed_batches.append(batch)
             return
 
-        created = duplicates = 0
+        created = duplicates = replaced = 0
         retry, dropped_errors = [], []
         for entry, item in zip(batch, items):
             res = next(iter(item.values()))
             status = res.get('status', 0)
-            if status in (200, 201):
+            if status == 201:
                 created += 1
+            elif status == 200:
+                replaced += 1  # a final certificate overwrote its precert (or a re-logged final)
             elif status == 409:
                 duplicates += 1
             elif status == 429 or status >= 500:
@@ -231,6 +246,7 @@ class ElasticsearchOutput:
                 dropped_errors.append(res.get('error'))
 
         self.stats['created'] += created
+        self.stats['replaced'] = self.stats.get('replaced', 0) + replaced
         self.stats['duplicate_409'] += duplicates
         if retry:
             self.stats['retried'] += len(retry)
@@ -241,7 +257,7 @@ class ElasticsearchOutput:
             self.logger.error(f"[{timestamp}] ❌ Dropped {len(dropped_errors)} docs with non-retryable errors, first: {dropped_errors[0]}")
         self.logger.info(
             f"✅ Indexed {created} documents to {batch[0][0]} "
-            f"({duplicates} already present, {len(retry)} to retry; "
+            f"({replaced} replaced, {duplicates} already present, {len(retry)} to retry; "
             f"skipped locally so far: {self.stats['skipped_local']})"
         )
 

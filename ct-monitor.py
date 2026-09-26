@@ -49,6 +49,9 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding
 import publicsuffix2
+
+# RFC 6962 precertificate poison extension: present on a precert, never on the final certificate.
+CT_POISON_OID = "1.3.6.1.4.1.11129.2.4.3"
 from fetcher import PositionStore, RangeFetcher, RateLimited
 from colorama import init, Fore, Back, Style
 
@@ -104,7 +107,10 @@ class CTResult:
     emails: List[str] = field(default_factory=list)
     ips: List[str] = field(default_factory=list)
     dns: List[str] = field(default_factory=list)
-    
+    # issuer + serial: shared by a precertificate and its final certificate, unlike sha1
+    issuance_key: Optional[str] = None
+    precert: bool = False
+
     def to_dict(self) -> Dict:
         """Convert to dictionary, excluding None values"""
         return {
@@ -114,7 +120,9 @@ class CTResult:
             'sha1': self.sha1,
             'email': self.emails if self.emails else None,
             'ip': self.ips if self.ips else None,
-            'dns': self.dns if self.dns else None
+            'dns': self.dns if self.dns else None,
+            'ik': self.issuance_key,
+            'pc': self.precert,
         }
 
 
@@ -592,6 +600,25 @@ class CTLogMonitor:
         return logs
     
     @staticmethod
+    def _issuance_identity(cert: x509.Certificate) -> Tuple[Optional[str], bool]:
+        """(issuer+serial key, is_precert) for one parsed certificate.
+
+        A precertificate and its final certificate have different SHA-1s but the same issuer and
+        serial, so this key lets the output store ONE document per issued certificate. Measured
+        2026-09-26 on 6,000 Argon/Xenon entries: Amazon, DigiCert, Microsoft and most Sectigo
+        issuance is logged ONLY as a precert, so precerts cannot simply be dropped.
+        """
+        try:
+            is_precert = any(ext.oid.dotted_string == CT_POISON_OID for ext in cert.extensions)
+        except Exception:
+            is_precert = False
+        try:
+            issuer = hashlib.sha1(cert.issuer.public_bytes()).hexdigest()[:16]
+            return f"{issuer}:{cert.serial_number:x}", is_precert
+        except Exception:
+            return None, is_precert
+
+    @staticmethod
     def _precert_from_extra_data(extra_data_b64: str) -> Optional[x509.Certificate]:
         """The pre_certificate from a precert entry's extra_data, or None."""
         try:
@@ -720,6 +747,7 @@ class CTLogMonitor:
         # Calculate SHA1 hash
         sha1_hash = hashlib.sha1(cert.public_bytes(Encoding.DER)).hexdigest()
         self.logger.debug(f"🔐 SHA1: {sha1_hash}")
+        issuance_key, is_precert = self._issuance_identity(cert)
         
         # Extract additional information
         cn = self._extract_common_name(cert)
@@ -750,7 +778,9 @@ class CTLogMonitor:
                 sha1=sha1_hash,
                 emails=emails if emails else None,
                 ips=ips if ips else None,
-                dns=filtered_dns if filtered_dns else None  # Only store if there are other SANs
+                dns=filtered_dns if filtered_dns else None,  # Only store if there are other SANs
+                issuance_key=issuance_key,
+                precert=is_precert,
             )
             results.append(result)
         

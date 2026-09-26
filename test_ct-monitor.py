@@ -694,7 +694,7 @@ class TestElasticsearchDedup:
     def test_flush_uses_create_with_id_and_retries_only_retryable(self, mock_session_class):
         es, session = self._make(mock_session_class)
         for n in ["a.example", "b.example", "c.example", "d.example"]:
-            es.add_to_batch(self._cert(n), "u")
+            es.add_to_batch({**self._cert(n), "pc": True}, "u")
         resp = Mock(status_code=200)
         resp.json.return_value = {"errors": True, "items": [
             {"create": {"status": 201}},
@@ -714,6 +714,38 @@ class TestElasticsearchDedup:
         assert len(es.failed_batches) == 1
         assert [e[2]['d'] for e in es.failed_batches[0]] == ["c.example"]
         assert es.stats['created'] == 1 and es.stats['duplicate_409'] == 1 and es.stats['dropped'] == 1
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_precert_then_final_share_one_doc_and_final_replaces(self, mock_session_class):
+        es, session = self._make(mock_session_class)
+        es.add_to_batch({**self._cert("x.example", "aa" * 20), "ik": "iss:1", "pc": True}, "u")
+        es.add_to_batch({**self._cert("x.example", "bb" * 20), "ik": "iss:1", "pc": False}, "u")
+        es.add_to_batch({**self._cert("x.example", "bb" * 20), "ik": "iss:1", "pc": False}, "u")
+        assert [(e[1], e[3]) for e in es.batch] == [
+            (es.doc_id("x.example", "iss:1"), "create"), (es.doc_id("x.example", "iss:1"), "index")]
+        assert es.stats['skipped_local'] == 1
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"errors": False, "items": [
+            {"create": {"status": 201}}, {"index": {"status": 200}}]}
+        session.post.return_value = resp
+        es.flush()
+        lines = session.post.call_args.kwargs['data'].strip().split('\n')
+        assert list(json.loads(lines[2])) == ["index"]
+        assert json.loads(lines[3])["h"] == "bb" * 20
+        assert es.stats['created'] == 1 and es.stats['replaced'] == 1
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_precert_after_final_is_skipped(self, mock_session_class):
+        es, _ = self._make(mock_session_class)
+        es.add_to_batch({**self._cert("x.example", "bb" * 20), "ik": "iss:1", "pc": False}, "u")
+        es.add_to_batch({**self._cert("x.example", "aa" * 20), "ik": "iss:1", "pc": True}, "u")
+        assert len(es.batch) == 1 and es.batch[0][3] == "index"
+
+    @patch('elasticsearch_output.requests.Session')
+    def test_without_issuance_key_falls_back_to_sha1(self, mock_session_class):
+        es, _ = self._make(mock_session_class)
+        es.add_to_batch(self._cert("x.example", "aa" * 20), "u")
+        assert es.batch[0][1] == es.doc_id("x.example", "aa" * 20)
 
     @patch('elasticsearch_output.requests.Session')
     def test_all_duplicates_is_not_a_failure(self, mock_session_class):

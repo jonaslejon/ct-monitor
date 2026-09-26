@@ -21,15 +21,17 @@ spec.loader.exec_module(ctm)
 sys.argv = _argv
 
 
-def make_cert_der(name="precert.example"):
+def make_cert_der(name="precert.example", poison=False, serial=1):
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
     now = datetime.datetime(2026, 9, 25)
-    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
-            .public_key(key.public_key()).serial_number(1)
-            .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=90))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
-            .sign(key, hashes.SHA256()))
+    builder = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+               .public_key(key.public_key()).serial_number(serial)
+               .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=90))
+               .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False))
+    if poison:
+        builder = builder.add_extension(x509.PrecertPoison(), critical=True)
+    cert = builder.sign(key, hashes.SHA256())
     return cert.public_bytes(serialization.Encoding.DER)
 
 
@@ -45,6 +47,26 @@ def precert_entry(der):
 class TestPrecert(unittest.TestCase):
     def setUp(self):
         self.mon = ctm.CTLogMonitor(quiet=True)
+
+    def test_precert_and_final_share_an_issuance_key(self):
+        pre = x509.load_der_x509_certificate(make_cert_der("a.example", poison=True, serial=0xabc))
+        fin = x509.load_der_x509_certificate(make_cert_der("a.example", serial=0xabc))
+        other = x509.load_der_x509_certificate(make_cert_der("a.example", serial=0xabd))
+        k_pre, is_pre = ctm.CTLogMonitor._issuance_identity(pre)
+        k_fin, is_fin_pre = ctm.CTLogMonitor._issuance_identity(fin)
+        self.assertTrue(is_pre)
+        self.assertFalse(is_fin_pre)
+        self.assertEqual(k_pre, k_fin)
+        self.assertTrue(k_pre.endswith(":abc"))
+        self.assertNotEqual(k_pre, ctm.CTLogMonitor._issuance_identity(other)[0])
+
+    def test_processed_precert_carries_key_and_flag(self):
+        e = precert_entry(make_cert_der("p.example", poison=True, serial=7))
+        e["_v2"] = True
+        (r,) = [r for r in self.mon.process_certificate(e) if r.name == "p.example"]
+        self.assertTrue(r.precert)
+        self.assertTrue(r.issuance_key.endswith(":7"))
+        self.assertEqual(r.to_dict()["pc"], True)
 
     def test_extra_data_parser(self):
         der = make_cert_der()
