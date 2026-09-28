@@ -532,8 +532,14 @@ class CTLogMonitor:
                 self.dns_resolve = False
 
         # Threading
-        self.input_queue = queue.Queue()
-        self.output_queue = queue.Queue()
+        # BOUNDED queues. The gap-free fetcher can download far faster than certificates are parsed and
+        # written (TrustAsia hetu2027 bursts), and with unbounded queues the difference piled up in RAM:
+        # 2026-09-28 18:31 UTC the kernel OOM-killed ct-monitor at 123 GB anon RSS and took the whole node
+        # down with it. A full queue now blocks the fetchers (back-pressure), so the saved cursor and the
+        # reported lag track what has actually been processed, and memory stays bounded.
+        queue_max = int(os.getenv('CT_QUEUE_MAX', '100000'))
+        self.input_queue = queue.Queue(maxsize=queue_max)
+        self.output_queue = queue.Queue(maxsize=queue_max)
         self.shutdown_event = threading.Event()
         self.is_shutting_down = False  # Track if we're already shutting down
 
@@ -874,7 +880,7 @@ class CTLogMonitor:
                     
                 results = self.process_certificate(entry)
                 for result in results:
-                    self.output_queue.put(result)
+                    self._put(self.output_queue, result)
                     qs = self.output_queue.qsize()
                     
                 self.input_queue.task_done()
@@ -1065,7 +1071,7 @@ class CTLogMonitor:
                         for entry in entries:
                             if self.shutdown_event.is_set():
                                 return
-                            self.input_queue.put(entry)
+                            self._put(self.input_queue, entry)
                             entries_processed += 1
                         
                         # Progress indicator
@@ -1111,9 +1117,19 @@ class CTLogMonitor:
                 return n
         return 1
 
+    def _put(self, q: "queue.Queue", item) -> bool:
+        """Blocking put that still honours shutdown (a plain put() on a full queue would hang it)."""
+        while not self.shutdown_event.is_set():
+            try:
+                q.put(item, timeout=1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
     def _enqueue_v2(self, entry: Dict) -> None:
         entry['_v2'] = True  # enables precert parsing for this entry (see parse_certificate_entry)
-        self.input_queue.put(entry)
+        self._put(self.input_queue, entry)
 
     def monitor_log_v2(self, log_url: str):
         """Monitor one log without gaps: advance by entries RETURNED, fetch ranges in parallel,
