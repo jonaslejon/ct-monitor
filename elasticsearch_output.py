@@ -6,10 +6,12 @@ Sends certificate data to Elasticsearch with minimal storage format
 
 import json
 import requests
+import threading
+import time
 import xxhash
 from collections import OrderedDict
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 import logging
 import os
 from dotenv import load_dotenv
@@ -26,7 +28,8 @@ class ElasticsearchOutput:
                  es_user: Optional[str] = None,
                  es_password: Optional[str] = None,
                  index_prefix: str = "ct-domains",
-                 batch_size: int = 1000):
+                 batch_size: int = 1000,
+                 should_stop: Optional[Callable[[], bool]] = None):
 
         # Use environment variables or fallback to defaults
         self.es_host = (es_host or os.getenv('ES_HOST', 'http://localhost:9200')).rstrip('/')
@@ -40,6 +43,19 @@ class ElasticsearchOutput:
         # and its ids still match that day's copies.
         self.batch: List[tuple] = []
         self.failed_batches: List[List[tuple]] = []  # Queue for retrying failed batches
+
+        # BOUNDED retry list. While Elasticsearch refuses writes (down, restarting, or its
+        # read-only flood-stage block, which answers 429) every batch lands here, and with no
+        # cap this list grew without limit: the bounded input/output queues in ct-monitor.py
+        # never filled, the fetchers kept going and the memory went here instead. At the cap
+        # add_to_batch() waits and retries, so the back-pressure reaches the fetchers and the
+        # saved cursors stop instead of the documents piling up in RAM.
+        self.retry_max_docs = int(os.getenv('CT_ES_RETRY_MAX_DOCS', '200000'))
+        self.should_stop = should_stop or (lambda: False)
+        self._sleep = time.sleep  # replaceable in tests
+        # flush() runs in the output thread and retry_failed_batches() also runs from the main
+        # thread every 30 s; the lock keeps them from interleaving on batch / failed_batches.
+        self._lock = threading.RLock()
 
         # Duplicate suppression. The same (domain, cert) pair reaches us several times,
         # a few seconds apart (measured 2026-09-24: ~3.7 identical copies per pair per
@@ -158,6 +174,7 @@ class ElasticsearchOutput:
 
     def add_to_batch(self, ct_result: Dict, log_url: str):
         """Add result to batch, flush if batch size reached"""
+        self._wait_for_retry_room()
         minimal_data = self.transform_to_minimal(ct_result, log_url)
         index_name = self._get_index_name()
         # One document per ISSUED certificate: key on issuer+serial (`ik`), which a precert and
@@ -177,10 +194,35 @@ class ElasticsearchOutput:
             sample = minimal_data['s'][:3] if len(minimal_data['s']) > 3 else minimal_data['s']
             self.logger.debug(f"SAN: {sample}... ({len(minimal_data['s'])} domains)")
 
-        self.batch.append((index_name, doc_id, minimal_data, 'create' if is_precert else 'index'))
+        with self._lock:
+            self.batch.append((index_name, doc_id, minimal_data, 'create' if is_precert else 'index'))
+            if len(self.batch) >= self.batch_size:
+                self.flush()
 
-        if len(self.batch) >= self.batch_size:
-            self.flush()
+    def pending_retry_docs(self) -> int:
+        with self._lock:
+            return sum(len(b) for b in self.failed_batches)
+
+    def _wait_for_retry_room(self):
+        """Block the caller (the output thread) while the retry list is at its cap."""
+        pending = self.pending_retry_docs()
+        if pending < self.retry_max_docs:
+            return
+        started, delay = time.monotonic(), 1.0
+        self.logger.warning(f"⏸️ {pending} documents are waiting for an Elasticsearch retry (cap "
+                            f"{self.retry_max_docs}); pausing the writer until they go through")
+        while not self.should_stop():
+            for _ in range(int(delay)):
+                if self.should_stop():
+                    return
+                self._sleep(1)
+            self.retry_failed_batches()
+            pending = self.pending_retry_docs()
+            if pending < self.retry_max_docs:
+                self.logger.warning(f"▶️ Elasticsearch accepts writes again; writer resumed after "
+                                    f"{time.monotonic() - started:.0f}s ({pending} documents still to retry)")
+                return
+            delay = min(delay * 2, 30)
 
     def flush(self):
         """Flush current batch to Elasticsearch.
@@ -191,11 +233,14 @@ class ElasticsearchOutput:
         queued again. Previously any item error re-queued the whole batch with plain
         `index` ops, which re-wrote every document that had already succeeded.
         """
-        if not self.batch:
-            return
+        with self._lock:
+            if not self.batch:
+                return
+            batch, self.batch = self.batch, []
+            self._send(batch)
 
-        batch = self.batch
-        self.batch = []
+    def _send(self, batch: List[tuple]) -> bool:
+        """Send one batch; queue whatever failed retryably. True when nothing was queued."""
         bulk_data = []
         for index_name, doc_id, doc, op in batch:
             bulk_data.append(json.dumps({op: {"_index": index_name, "_id": doc_id}}))
@@ -212,13 +257,13 @@ class ElasticsearchOutput:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.logger.error(f"[{timestamp}] ❌ Failed to send batch to Elasticsearch: {e}")
             self.failed_batches.append(batch)
-            return
+            return False
 
         if response.status_code != 200:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.logger.error(f"[{timestamp}] ❌ Elasticsearch error: {response.status_code} - {response.text[:500]}")
             self.failed_batches.append(batch)
-            return
+            return False
 
         result = response.json()
         items = result.get('items') or []
@@ -227,7 +272,7 @@ class ElasticsearchOutput:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.logger.error(f"[{timestamp}] ❌ Bulk returned {len(items)} items for {len(batch)} docs - retrying batch")
             self.failed_batches.append(batch)
-            return
+            return False
 
         created = duplicates = replaced = 0
         retry, dropped_errors = [], []
@@ -260,24 +305,25 @@ class ElasticsearchOutput:
             f"({replaced} replaced, {duplicates} already present, {len(retry)} to retry; "
             f"skipped locally so far: {self.stats['skipped_local']})"
         )
+        return not retry
 
     def retry_failed_batches(self):
-        """Retry sending failed batches"""
-        if not self.failed_batches:
-            return
+        """Retry failed batches, oldest first.
 
-        self.logger.info(f"🔄 Retrying {len(self.failed_batches)} failed batches")
-
-        # Move failed batches to temporary list to avoid modification during iteration
-        batches_to_retry = self.failed_batches.copy()
-        self.failed_batches = []
-
-        for batch in batches_to_retry:
-            # Temporarily set current batch and flush
-            original_batch = self.batch
-            self.batch = batch
-            self.flush()
-            self.batch = original_batch
+        Stops at the first batch Elasticsearch still refuses and keeps the rest, so an outage
+        costs one request (and one error line) per attempt instead of one per waiting batch.
+        It no longer swaps self.batch in and out: this runs from the main thread while the
+        output thread appends, and documents added during the swap were lost.
+        """
+        with self._lock:
+            if not self.failed_batches:
+                return
+            pending, self.failed_batches = self.failed_batches, []
+            self.logger.info(f"🔄 Retrying {len(pending)} failed batches")
+            for i, batch in enumerate(pending):
+                if not self._send(batch):
+                    self.failed_batches.extend(pending[i + 1:])
+                    break
 
     def close(self):
         """Flush any remaining data, retry failed batches, and close connections"""

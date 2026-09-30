@@ -489,7 +489,10 @@ class CTLogMonitor:
         if self.es_output:
             try:
                 from elasticsearch_output import ElasticsearchOutput
-                self.es_output_handler = ElasticsearchOutput()
+                # should_stop lets a writer that is waiting on a full retry list notice a shutdown
+                # (shutdown_event is created further down; the lambda reads it only at run time).
+                self.es_output_handler = ElasticsearchOutput(
+                    should_stop=lambda: self.shutdown_event.is_set())
                 self.logger.info("✅ Elasticsearch output initialized")
             except ImportError as e:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
