@@ -22,7 +22,7 @@ License: MIT
 Repository: https://github.com/jonaslejon/ct-monitor
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __author__ = "Jonas Lejon <jonas.github@triop.se>"
 __license__ = "MIT"
 
@@ -1327,10 +1327,13 @@ class CTLogMonitor:
                 cursor = fetcher.fetch(
                     cursor, tree_size,
                     on_progress=lambda c: self.position_store.set(log_url, c))
-                head = self.get_sth(log_url) or {}
-                behind = cursor > before and head.get('tree_size', 0) - cursor > 1000
+                # Report the lag against the LIVE head. The head read at the start of the pass is what this
+                # pass fetched up to, so lag against it reads ~0 at the end of every pass however far
+                # behind the log is (it read 0 on 2026-10-01 while the log was ~5M entries behind).
+                live = (self.get_sth(log_url) or {}).get('tree_size') or tree_size
+                behind = cursor > before and live - cursor > 1000
                 self.logger.warning(
-                    f"📍 {log_url} cursor={cursor} head={tree_size} lag={tree_size - cursor} "
+                    f"📍 {log_url} cursor={cursor} head={live} lag={live - cursor} "
                     f"fetched={cursor - before}", force=True)
                 if not self.follow:
                     break  # one pass only, like the classic loop without -f

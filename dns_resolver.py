@@ -438,6 +438,8 @@ class DNSResolver:
             return 'timeout'
         elif 'servfail' in error_str:
             return 'servfail'
+        elif 'does not contain an answer' in error_str or type(error).__name__ == 'NoAnswer':
+            return 'noanswer'  # the name exists but has no A record; was 'unknown' (12% of lookups)
         elif 'refused' in error_str:
             return 'refused'
         else:

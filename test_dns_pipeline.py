@@ -84,6 +84,12 @@ class TimeoutClassTest(unittest.TestCase):
         self.assertEqual(r._classify_error(LifetimeTimeout('The resolution lifetime expired after 4.001 seconds')), 'timeout')
         self.assertEqual(r._classify_error(Exception('The DNS query name does not exist: x.')), 'nxdomain')
 
+    def test_no_a_record_is_noanswer_not_unknown(self):
+        class NoAnswer(Exception):
+            pass
+        r = DNSResolver(QuietLog())
+        self.assertEqual(r._classify_error(NoAnswer('The DNS response does not contain an answer to the question: x. IN A')), 'noanswer')
+
 
 class ContinuousTest(unittest.TestCase):
     def test_one_slow_lookup_does_not_hold_back_the_rest(self):

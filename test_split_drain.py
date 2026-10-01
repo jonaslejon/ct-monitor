@@ -206,6 +206,18 @@ class DrainTest(unittest.TestCase):
         finally:
             os.environ.pop('CT_DRAIN_FETCH_WAIT')
 
+    def test_the_progress_line_reports_lag_against_the_live_head(self):
+        self.mon = mon = ctm.CTLogMonitor(quiet=True)          # one pass (no -f)
+        heads = iter([10_000, 15_000])                       # pass start, then the live head after the pass
+        mon.get_sth = lambda url: {'tree_size': next(heads, 15_000)}
+        mon.http_client.fetch_json_once = lambda url: {'entries': [{'leaf_input': '', 'extra_data': ''}] * 50}
+        lines = []
+        mon.logger.warning = lambda msg, force=False: lines.append(msg)
+        mon.monitor_log_v2('https://log.example/ct/')
+        line = [l for l in lines if l.startswith('📍')][-1]
+        self.assertIn('head=15000', line)
+        self.assertIn('lag=5000', line)
+
     def test_gap_free_fetcher_stops_on_fetch_stop_alone(self):
         # follow=True: without it monitor_log_v2 makes one pass and returns whatever the stop logic does
         self.mon = mon = ctm.CTLogMonitor(quiet=True, follow=True)
