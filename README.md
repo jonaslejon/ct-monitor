@@ -114,6 +114,19 @@ systemd, set `TimeoutStopSec` above `CT_DRAIN_TIMEOUT`. `Ctrl-C` still stops imm
 | `CT_QUEUE_MAX` | 100000 | Size of the input and output queues. Fetching pauses while they are full, so memory stays bounded. Smaller queues drain faster on stop |
 | `CT_DRAIN_TIMEOUT` | 150 | Seconds a `SIGTERM` stop waits for queued entries and results |
 | `CT_DRAIN_DNS_TIMEOUT` | 10 | Seconds a `SIGTERM` stop then waits for pending DNS lookups |
+| `CT_DRAIN_FETCH_WAIT` | 5 | Seconds a `SIGTERM` stop waits for requests still in flight. Positions are frozen when the stop begins, so anything fetched later is fetched again on the next start |
+
+### DNS resolution (`--dns-resolve`)
+
+- With Elasticsearch output, a name is resolved when its certificate document is first **created**
+  that day: not again for the same certificate in another log, nor for a final certificate that
+  replaces its precertificate.
+- A wildcard name `*.example.com` resolves `example.com` only. No subdomains are guessed.
+- Lookups run continuously, with `2 x --dns-workers` in flight per resolver thread (4 threads).
+- Answers are cached by host name (`--dns-cache-size` entries, 15 minutes).
+- Every 60 seconds a `🔎 DNS:` line reports the queue, drops, lookups per second and the cache hit
+  rate, even with `--quiet`. With `--state-file`, the same numbers are written to
+  `stats-<state file name>` next to it.
 | `CT_ES_RETRY_MAX_DOCS` | 200000 | Documents held for an Elasticsearch retry before the writer pauses |
 
 ## 🐳 Docker Usage
