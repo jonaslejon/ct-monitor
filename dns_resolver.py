@@ -622,12 +622,25 @@ class DNSResolverThread:
         with self.queue_lock:
             return self.queue.popleft() if self.queue else None
 
+    # A slot that finds the queue empty waits for more work and ends only after this long idle. Ending at
+    # the first empty moment let the slots die off one by one under bursty arrivals, while the worker still
+    # counted as active so no new one started: production ran 1-13 lookups in flight instead of 400.
+    SLOT_IDLE_SECONDS = 5.0
+
     async def _consume(self):
         async def slot():
+            idle_since = None
             while not self.shutting_down:
                 item = self._next_domain()
                 if item is None:
-                    return
+                    now = time.monotonic()
+                    if idle_since is None:
+                        idle_since = now
+                    elif now - idle_since >= self.SLOT_IDLE_SECONDS:
+                        return
+                    await asyncio.sleep(0.05)
+                    continue
+                idle_since = None
                 domain, cert_sha1 = item
                 try:
                     for name in self.resolver.names_for(domain):

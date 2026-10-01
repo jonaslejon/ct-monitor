@@ -108,6 +108,34 @@ class ContinuousTest(unittest.TestCase):
         self.assertEqual(t.resolved_total, 301)
         self.assertEqual(t.active_workers, 0)
 
+    def test_slots_survive_an_empty_moment_and_serve_the_next_burst_concurrently(self):
+        t = _thread(max_concurrent=50, num_workers=1)
+        t.SLOT_IDLE_SECONDS = 2.0
+        inflight = {'now': 0, 'peak': 0}
+
+        async def fake(name, sha1=None):
+            inflight['now'] += 1
+            inflight['peak'] = max(inflight['peak'], inflight['now'])
+            await asyncio.sleep(0.2)
+            inflight['now'] -= 1
+            return DNSResult(domain=name, ips=[], cert_sha1=sha1)
+        t.resolver.resolve_domain_async = fake
+        for i in range(10):
+            t.queue.append((f'first{i}.example', 'c'))
+        with t.workers_lock:
+            t.active_workers += 1
+        th = threading.Thread(target=t._run_batch_resolution, daemon=True)
+        th.start()
+        time.sleep(0.6)                      # first burst done; the queue is empty for a moment
+        inflight['peak'] = 0
+        for i in range(500):
+            t.queue.append((f'second{i}.example', 'c'))
+        time.sleep(1.0)
+        self.assertGreaterEqual(inflight['peak'], 40)   # was ~10: only slots that never saw an empty queue
+        th.join(10)
+        self.assertEqual(t.resolved_total, 510)
+        self.assertEqual(t.active_workers, 0)      # all slots ended after the idle period
+
     def test_an_exception_does_not_kill_the_slot(self):
         t = _thread(max_concurrent=1, num_workers=1)
 
