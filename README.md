@@ -82,6 +82,37 @@ python3 ct-monitor.py -f --new-fetcher-logs all --state-file state/positions.jso
 | `--fetch-workers` | Parallel ranges per log, e.g. `argon2026h2=4,xenon2026h2=4` (default 1) |
 | `--state-file` | Where to persist each log's position |
 | `--max-backlog` | On start, skip ahead if the saved position is further behind than this (default 2,000,000) |
+| `--logs` | Only monitor logs whose URL contains any of these comma-separated substrings |
+| `--exclude-logs` | Skip logs whose URL contains any of these comma-separated substrings |
+
+### Splitting the logs across processes
+
+Parsing certificates is CPU-bound, and one Python process uses one core, roughly 1,000 log entries per
+second. When the logs together grow faster than that, run several processes that share the logs. Give
+each its own state file, and let one of them use `--exclude-logs`, so that any log added to Chrome's list
+later is picked up by that one:
+
+```bash
+python3 ct-monitor.py -f --new-fetcher-logs all --logs argon --state-file state/positions-argon.json
+python3 ct-monitor.py -f --new-fetcher-logs all --logs xenon --state-file state/positions-xenon.json
+python3 ct-monitor.py -f --new-fetcher-logs all --exclude-logs argon,xenon --state-file state/positions.json
+```
+
+A selection that matches no log exits with code 2 instead of running idle.
+
+### Stopping without losing entries
+
+The saved position counts entries that have been fetched and queued. On `SIGTERM` the monitor stops
+fetching, lets the workers and the writer finish everything already queued (including pending DNS
+lookups), saves the positions, and exits. A restart therefore resumes without a gap. If the queues are
+not empty after `CT_DRAIN_TIMEOUT` seconds, it logs what is left and exits with code 3. Under systemd, set
+`TimeoutStopSec` above `CT_DRAIN_TIMEOUT`. `Ctrl-C` still stops immediately.
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `CT_QUEUE_MAX` | 100000 | Size of the input and output queues. Fetching pauses while they are full, so memory stays bounded. Smaller queues drain faster on stop |
+| `CT_DRAIN_TIMEOUT` | 150 | Seconds a `SIGTERM` stop waits for the queues to drain |
+| `CT_ES_RETRY_MAX_DOCS` | 200000 | Documents held for an Elasticsearch retry before the writer pauses |
 
 ## 🐳 Docker Usage
 
