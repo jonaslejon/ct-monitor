@@ -537,7 +537,9 @@ class CTLogMonitor:
                     use_public_resolvers=self.dns_public,
                     force_local_resolver=force_local_resolver,
                     max_concurrent=self.dns_workers * 2,  # Double dns_workers for concurrency
-                    num_workers=4  # 4 parallel batch processing threads
+                    num_workers=4,  # 4 parallel batch processing threads
+                    cache_size=self.dns_cache_size,  # --dns-cache-size (was never passed through)
+                    cache_ttl=900  # matches the local resolver's cache-min-ttl
                 )
             except ImportError as e:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -935,8 +937,10 @@ class CTLogMonitor:
                 # Print with color coding and better formatting
                 current_time = time.time()
 
-                # Add to DNS resolution queue if enabled
-                if self.dns_resolve and self.dns_resolver_thread:
+                # Add to DNS resolution queue if enabled. With Elasticsearch output the writer does it
+                # instead, for each document it CREATES (on_created), so a name is looked up once per
+                # (name, certificate) per day rather than once per log entry, SAN list and precert/final.
+                if self.dns_resolve and self.dns_resolver_thread and not self.es_output:
                     # Queue domain and SANs for resolution
                     cert_sha1 = data.get('sha1')
 
@@ -1147,6 +1151,38 @@ class CTLogMonitor:
                 continue
         return False
 
+    def _dns_stats_loop(self, interval: float = 60.0) -> None:
+        """Every `interval` s: one DNS status line (printed even with --quiet) and a JSON file next to
+        the state file (stats-<state file name>) that monitor.py reads. The DNS queue drops its oldest
+        names when full, and until 2026-10-01 nothing reported its size or its drops."""
+        path = None
+        if self.position_store.path:
+            d, b = os.path.split(self.position_store.path)
+            path = os.path.join(d, 'stats-' + b)
+        last_resolved, last_t = None, time.time()
+        while not self.shutdown_event.wait(interval):
+            try:
+                st = self.dns_resolver_thread.get_queue_stats()
+                now = time.time()
+                resolved = st.get('resolved_total', 0)
+                rate = (resolved - last_resolved) / max(now - last_t, 1e-6) if last_resolved is not None else 0.0
+                last_resolved, last_t = resolved, now
+                cache = (st.get('resolver_stats') or {}).get('cache_stats') or {}
+                self.logger.warning(
+                    f"🔎 DNS: queue {st['queue_size']:,}/{st['max_queue_size']:,}, dropped {st['dropped_domains']:,}, "
+                    f"{rate:,.0f} lookups/s, cache hit {cache.get('hit_rate', 0):.0f}%, "
+                    f"storage queue {st['storage_queue_size']:,}", force=True)
+                if path:
+                    doc = {'at': now, 'queue_size': st['queue_size'], 'max_queue_size': st['max_queue_size'],
+                           'dropped_domains': st['dropped_domains'], 'lookups_per_s': round(rate, 1),
+                           'resolved_total': resolved, 'storage_queue_size': st['storage_queue_size'],
+                           'cache_hit_rate': cache.get('hit_rate')}
+                    with open(path + '.tmp', 'w') as f:
+                        json.dump(doc, f)
+                    os.replace(path + '.tmp', path)
+            except Exception as e:
+                self.logger.warning(f"⚠️ DNS stats failed: {e}", force=True)
+
     @staticmethod
     def filter_logs(logs: List[str], include: Optional[str], exclude: Optional[str]) -> List[str]:
         """--logs keeps logs whose URL contains any listed substring; --exclude-logs then drops
@@ -1353,6 +1389,13 @@ class CTLogMonitor:
                 worker = threading.Thread(target=self.worker_thread, daemon=True)
                 worker.start()
                 workers.append(worker)
+
+            if self.es_output and self.dns_resolver_thread and hasattr(self, 'es_output_handler'):
+                # Look a name up when its ct-domains document is first CREATED. Repeats from other logs and
+                # a final certificate replacing its precert were ~78% of writes on 2026-10-01.
+                self.es_output_handler.on_created = self.dns_resolver_thread.add_domain
+            if self.dns_resolver_thread:
+                threading.Thread(target=self._dns_stats_loop, daemon=True).start()
 
             # Start output thread
             self.logger.info("📝 Starting output thread")

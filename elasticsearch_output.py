@@ -51,6 +51,9 @@ class ElasticsearchOutput:
         # add_to_batch() waits and retries, so the back-pressure reaches the fetchers and the
         # saved cursors stop instead of the documents piling up in RAM.
         self.retry_max_docs = int(os.getenv('CT_ES_RETRY_MAX_DOCS', '200000'))
+        # Called with (domain, sha1) for each document Elasticsearch CREATED (201): the first sighting
+        # of that (domain, certificate) today. ct-monitor points it at the DNS queue.
+        self.on_created = None
         self.should_stop = should_stop or (lambda: False)
         self._sleep = time.sleep  # replaceable in tests
         # flush() runs in the output thread and retry_failed_batches() also runs from the main
@@ -275,12 +278,13 @@ class ElasticsearchOutput:
             return False
 
         created = duplicates = replaced = 0
-        retry, dropped_errors = [], []
+        retry, dropped_errors, created_docs = [], [], []
         for entry, item in zip(batch, items):
             res = next(iter(item.values()))
             status = res.get('status', 0)
             if status == 201:
                 created += 1
+                created_docs.append(entry[2])
             elif status == 200:
                 replaced += 1  # a final certificate overwrote its precert (or a re-logged final)
             elif status == 409:
@@ -293,6 +297,12 @@ class ElasticsearchOutput:
         self.stats['created'] += created
         self.stats['replaced'] = self.stats.get('replaced', 0) + replaced
         self.stats['duplicate_409'] += duplicates
+        if self.on_created:
+            for doc in created_docs:
+                try:
+                    self.on_created(doc.get('d'), doc.get('h'))
+                except Exception as e:
+                    self.logger.debug(f"on_created failed for {doc.get('d')}: {e}")
         if retry:
             self.stats['retried'] += len(retry)
             self.failed_batches.append(retry)

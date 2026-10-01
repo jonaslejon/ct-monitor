@@ -15,7 +15,7 @@ import logging
 import json
 import struct
 import ipaddress
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from threading import Lock
 import concurrent.futures
 import os as _os
@@ -304,6 +304,16 @@ class DNSResolver:
         self.stats["wildcards_expanded"] += 1
         return expanded
 
+    @staticmethod
+    def names_for(domain: str) -> List[str]:
+        """The names to look up for one certificate name: a wildcard `*.x` resolves `x` only.
+
+        It used to add guessed `www.x` and `mail.x` too (expand_wildcard, first 3). Those were a third
+        of all lookups, and in zones that answer any name they were stored as real hosts: `mail.x`
+        was 20% of ct-dns on 2026-10-01 and appeared as a subdomain in /ct/dns for domains whose
+        certificates never named it."""
+        return [domain[2:]] if domain.startswith('*.') else [domain]
+
     def is_internal_domain(self, domain: str) -> bool:
         """Check if domain is internal/private"""
         internal_tlds = ['.local', '.internal', '.lan', '.home', '.corp', '.private']
@@ -330,11 +340,13 @@ class DNSResolver:
         """Resolve a single domain asynchronously"""
 
         # Check cache first
-        cache_key = f"{domain}:{cert_sha1 or ''}"
+        # Keyed by host alone: the same host from another certificate needs no new lookup. The cached
+        # answer is re-bound to THIS certificate, because the stored document is per (host, certificate).
+        cache_key = domain
         cached = self.cache.get(cache_key)
         if cached:
             self.stats["cached"] += 1
-            return cached
+            return replace(cached, cert_sha1=cert_sha1, timestamp=int(time.time()))
 
         self.stats["total_queries"] += 1
 
@@ -422,7 +434,7 @@ class DNSResolver:
 
         if 'nxdomain' in error_str or 'not exist' in error_str:
             return 'nxdomain'
-        elif 'timeout' in error_str:
+        elif 'timeout' in error_str or 'lifetime expired' in error_str or 'Timeout' in type(error).__name__:
             return 'timeout'
         elif 'servfail' in error_str:
             return 'servfail'
@@ -452,12 +464,8 @@ class DNSResolver:
         tasks = []
         for domain, cert_sha1 in unique_domains.values():
             # Handle wildcards
-            if domain.startswith('*.'):
-                expanded = self.expand_wildcard(domain)
-                for exp_domain in expanded[:3]:  # Limit expansion to first 3
-                    tasks.append(resolve_with_semaphore(exp_domain, cert_sha1))
-            else:
-                tasks.append(resolve_with_semaphore(domain, cert_sha1))
+            for name in self.names_for(domain):
+                tasks.append(resolve_with_semaphore(name, cert_sha1))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -493,7 +501,9 @@ class DNSResolverThread:
                  force_local_resolver: str = None,
                  max_queue_size: int = None,
                  max_concurrent: int = 100,  # Increased from 50 for more parallelism
-                 num_workers: int = 4):  # Multiple worker threads for parallel batch processing
+                 num_workers: int = 4,  # Multiple worker threads for parallel batch processing
+                 cache_size: int = 10000,
+                 cache_ttl: int = 300):
 
         self.logger = logger
         self.batch_size = batch_size
@@ -504,8 +514,11 @@ class DNSResolverThread:
 
         self.resolver = DNSResolver(logger,
                                    max_concurrent=max_concurrent,
+                                   cache_size=cache_size,
+                                   cache_ttl=cache_ttl,
                                    use_public_resolvers=use_public_resolvers,
                                    force_local_resolver=force_local_resolver)
+        self.resolved_total = 0  # results produced (lookups + cache hits), for the stats line
         self.queue: deque = deque(maxlen=self.max_queue_size)
         self.queue_lock = Lock()
         self.last_flush = time.time()
@@ -591,38 +604,38 @@ class DNSResolverThread:
             self.storage_running = False
 
     def _run_batch_resolution(self):
-        """Run batch resolution in thread - processes continuously while queue has work"""
-        # Create event loop for this thread
+        """Resolve continuously while the queue has work.
+
+        max_concurrent lookups are in flight, and each slot takes the next name as soon as its own
+        lookup ends. Batches of 500 used to wait for their slowest member, and ~8% of lookups end in
+        the 4 s lifetime timeout, which capped a unit at ~330 lookups/s (measured 2026-10-01)."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
         try:
-            # Process batches continuously while queue has work
-            while not self.shutting_down:
-                # Get batch
-                with self.queue_lock:
-                    if len(self.queue) == 0:
-                        break  # No more work
-                    batch = []
-                    for _ in range(min(self.batch_size, len(self.queue))):
-                        if self.queue:
-                            batch.append(self.queue.popleft())
-
-                if not batch:
-                    break
-
-                # Run async resolution
-                results = loop.run_until_complete(
-                    self.resolver.resolve_batch(batch)
-                )
-
-                # Queue results for async storage (non-blocking)
-                self._queue_results_for_storage(results)
-
+            loop.run_until_complete(self._consume())
         finally:
             with self.workers_lock:
                 self.active_workers -= 1
             loop.close()
+
+    def _next_domain(self):
+        with self.queue_lock:
+            return self.queue.popleft() if self.queue else None
+
+    async def _consume(self):
+        async def slot():
+            while not self.shutting_down:
+                item = self._next_domain()
+                if item is None:
+                    return
+                domain, cert_sha1 = item
+                try:
+                    for name in self.resolver.names_for(domain):
+                        result = await self.resolver.resolve_domain_async(name, cert_sha1)
+                        self._queue_results_for_storage([result])
+                except Exception as e:  # one bad name must not end the slot
+                    self.logger.debug(f"Resolution error for {domain}: {e}")
+        await asyncio.gather(*(slot() for _ in range(max(1, self.resolver.max_concurrent))))
 
     def _queue_results_for_storage(self, results: List[DNSResult]):
         """Queue results for async storage - non-blocking"""
@@ -633,6 +646,7 @@ class DNSResolverThread:
                 self.logger.debug(f"Failed to resolve {result.domain}: {result.error}")
 
             # Add to storage queue for async processing
+            self.resolved_total += 1
             if self.storage:
                 self.storage_queue.append(result)
 
@@ -665,6 +679,7 @@ class DNSResolverThread:
                 "dropped_domains": self.dropped_domains,
                 "active_workers": self.active_workers,
                 "storage_queue_size": len(self.storage_queue),
+                "resolved_total": self.resolved_total,
                 "resolver_stats": self.resolver.get_stats()
             }
 
