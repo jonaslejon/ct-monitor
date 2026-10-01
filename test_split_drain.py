@@ -182,6 +182,30 @@ class DrainTest(unittest.TestCase):
         for name in ('get_queue_stats', '_trigger_flush'):
             self.assertTrue(callable(getattr(dns_resolver.DNSResolverThread, name, None)), name)
 
+    def test_drain_freezes_the_cursors_before_draining(self):
+        import json, tempfile
+        d = tempfile.mkdtemp()
+        self.mon = mon = ctm.CTLogMonitor(quiet=True, state_file=os.path.join(d, 'p.json'))
+        mon.position_store.set('https://log.example/', 100)
+        self.assertTrue(mon.graceful_drain(5))
+        mon.position_store.set('https://log.example/', 999)   # a range that completed after the stop began
+        mon.position_store.flush(force=True)
+        with open(os.path.join(d, 'p.json')) as f:
+            self.assertEqual(json.load(f)['positions']['https://log.example/'], 100)
+
+    def test_a_slow_fetch_does_not_hold_the_stop(self):
+        self.mon = mon = _mon()
+        import concurrent.futures
+        never = concurrent.futures.Future()             # a fetcher stuck in a slow request
+        mon._log_futures = [never]
+        os.environ['CT_DRAIN_FETCH_WAIT'] = '0.5'
+        try:
+            t0 = time.monotonic()
+            self.assertTrue(mon.graceful_drain(60))
+            self.assertLess(time.monotonic() - t0, 5)
+        finally:
+            os.environ.pop('CT_DRAIN_FETCH_WAIT')
+
     def test_gap_free_fetcher_stops_on_fetch_stop_alone(self):
         # follow=True: without it monitor_log_v2 makes one pass and returns whatever the stop logic does
         self.mon = mon = ctm.CTLogMonitor(quiet=True, follow=True)

@@ -58,8 +58,16 @@ class PositionStore:
         with self._lock:
             return self._positions.get(log_url)
 
+    def freeze(self) -> None:
+        """Accept no further positions. A graceful stop freezes the cursors before it drains the queues,
+        so a range that completes afterwards (its entries may never be processed) cannot move them."""
+        with self._lock:
+            self._frozen = True
+
     def set(self, log_url: str, next_index: int) -> None:
         with self._lock:
+            if getattr(self, '_frozen', False):
+                return
             if self._positions.get(log_url) != next_index:
                 self._positions[log_url] = next_index
                 self._dirty = True

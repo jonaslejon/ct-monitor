@@ -1205,9 +1205,15 @@ class CTLogMonitor:
         self.logger.warning(f"🛑 Graceful stop: draining {self.input_queue.unfinished_tasks:,} queued "
                             f"entries and {self.output_queue.unfinished_tasks:,} results "
                             f"(deadline {timeout:.0f}s)", force=True)
+        # Freeze the cursors now: they cover only ranges whose entries are already queued, and the
+        # queues are drained below. A fetch still in flight cannot move them any more, so its entries
+        # are fetched again on the next start, and the stop need not wait for a slow log server (one
+        # TrustAsia request held a stop for the whole 150 s on 2026-10-01).
+        self.position_store.freeze()
+        fetch_wait = min(deadline, time.monotonic() + float(os.getenv('CT_DRAIN_FETCH_WAIT', '5')))
         for fut in self._log_futures:
             try:
-                fut.result(timeout=max(0.1, deadline - time.monotonic()))
+                fut.result(timeout=max(0.1, fetch_wait - time.monotonic()))
             except TimeoutError:
                 break
             except Exception:
