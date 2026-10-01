@@ -1192,21 +1192,29 @@ class CTLogMonitor:
                                         f"not waiting for pending DNS lookups", force=True)
             return self.input_queue.unfinished_tasks, self.output_queue.unfinished_tasks, dns
 
+        # Phase 1: entries and results. The saved cursors are only right once these are empty.
         left = pending()
-        while any(left) and time.monotonic() < deadline:
-            if not left[0] and not left[1] and left[2] and self.dns_resolver_thread:
+        while (left[0] or left[1]) and time.monotonic() < deadline:
+            time.sleep(0.2)
+            left = pending()
+        # Phase 2: DNS lookups, briefly. They are best effort: the DNS queue drops its oldest entries
+        # when full, and during a catch-up it can hold hundreds of thousands (measured 2026-10-01:
+        # 677k and 753k), far more than any stop timeout can wait for.
+        dns_deadline = min(deadline, time.monotonic() + float(os.getenv('CT_DRAIN_DNS_TIMEOUT', '10')))
+        while left[2] and not (left[0] or left[1]) and time.monotonic() < dns_deadline:
+            if self.dns_resolver_thread:
                 # The DNS queue flushes only when a domain is added; nothing is added any more.
                 self.dns_resolver_thread._trigger_flush()
             time.sleep(0.2)
             left = pending()
         self.position_store.flush(force=True)
-        if any(left):
-            self.logger.warning(f"⚠️ Graceful stop deadline passed with {left[0]:,} entries, {left[1]:,} "
-                                f"results and {left[2]:,} DNS lookups still queued; those are lost",
-                                force=True)
+        if left[0] or left[1]:
+            self.logger.warning(f"⚠️ Graceful stop deadline passed with {left[0]:,} entries and {left[1]:,} "
+                                f"results still queued; those are lost", force=True)
             return False
+        dns_note = f"; {left[2]:,} DNS lookups not done (best effort)" if left[2] else ""
         self.logger.warning(f"✅ Graceful stop: queues drained in {time.monotonic() - started:.1f}s, "
-                            f"cursors saved", force=True)
+                            f"cursors saved{dns_note}", force=True)
         return True
 
     def _enqueue_v2(self, entry: Dict) -> None:

@@ -140,6 +140,28 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(mon.dns_resolver_thread.queue, 0)
         self.assertGreaterEqual(mon.dns_resolver_thread.flushes, 3)
 
+    def test_a_dns_backlog_does_not_hold_the_stop(self):
+        self.mon = mon = _mon()
+
+        class SlowDNS:
+            def get_queue_stats(self):
+                return {'queue_size': 700_000, 'active_workers': 50}
+
+            def _trigger_flush(self):
+                pass
+        mon.dns_resolve, mon.dns_resolver_thread = True, SlowDNS()
+        old = os.environ.get('CT_DRAIN_DNS_TIMEOUT')
+        os.environ['CT_DRAIN_DNS_TIMEOUT'] = '0.5'
+        try:
+            t0 = time.monotonic()
+            self.assertTrue(mon.graceful_drain(60))   # entries and results are empty: a success
+            self.assertLess(time.monotonic() - t0, 5)
+        finally:
+            if old is None:
+                os.environ.pop('CT_DRAIN_DNS_TIMEOUT')
+            else:
+                os.environ['CT_DRAIN_DNS_TIMEOUT'] = old
+
     def test_an_unreadable_dns_queue_does_not_abort_the_drain(self):
         self.mon = mon = _mon()
 
