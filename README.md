@@ -2,9 +2,27 @@
 
 A powerful Python tool for monitoring Certificate Transparency (CT) logs to extract domain names, IP addresses, and email addresses from SSL/TLS certificates in real-time.
 
-![Python](https://img.shields.io/badge/python-3.7+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
+
+## 🆕 What's new in 1.4.0
+
+- **Gap-free fetching**: advances by the entries a log actually returns, fetches ranges in parallel,
+  and resumes from a state file after a restart (`--new-fetcher-logs`, `--fetch-workers`, `--state-file`).
+- **Precertificates are parsed** (from `extra_data`) by the gap-free fetcher. Many CAs log some
+  certificates only as a precertificate.
+- **One Elasticsearch document per issued certificate**: the document id is built from the domain and
+  issuer + serial, so a precertificate and its final certificate collapse, and a certificate seen in
+  several logs is stored once per daily index.
+- **Bounded memory**: the queues are bounded, and the Elasticsearch retry list is capped.
+- **Several processes can share the logs** (`--logs`, `--exclude-logs`). One process uses one CPU core.
+- **Stopping loses nothing**: `SIGTERM` drains the queues before exiting.
+- **DNS resolution**:
+  - a name is resolved once, when its document is first created;
+  - wildcards resolve their base name only;
+  - lookups run continuously;
+  - a periodic status line reports the DNS queue.
 
 ## 🌟 Features
 
@@ -15,22 +33,22 @@ A powerful Python tool for monitoring Certificate Transparency (CT) logs to extr
 - **📊 Real-time Statistics**: Progress tracking and success rates
 - **⚡ Adaptive Rate Limiting**: Per-server adaptive rate control with circuit breaker pattern
 - **🔄 Follow Mode**: Continuous monitoring for new certificates
+- **🧭 Gap-free Fetching**: Parallel ranges per log, resume from a state file, graceful stop
 - **🌐 Global Coverage**: Monitors all known CT logs or specific targets
 - **🔍 DNS Resolution**: Resolve discovered domains to IP addresses with caching
 - **🌍 Public DNS Round-Robin**: Distribute queries across 6 major DNS providers
-- **💾 Elasticsearch Storage**: Direct output to Elasticsearch with time-based indices and automatic retry
+- **💾 Elasticsearch Storage**: Direct output to Elasticsearch with daily indices, de-duplicated document ids and automatic retry
 
 ## 🔧 Installation
 
 ### Prerequisites
 
 ```bash
-# Core requirements
-pip install requests cryptography publicsuffix2 colorama python-dotenv
-
-# Optional: For DNS resolution feature (recommended)
-pip install dnspython
+pip install -r requirements.txt
 ```
+
+The requirements are `requests`, `cryptography`, `publicsuffix2`, `colorama`, `python-dotenv`, `xxhash`,
+`dnspython` (for `--dns-resolve`) and `tldextract`.
 
 ### Clone Repository
 
@@ -133,6 +151,14 @@ systemd, set `TimeoutStopSec` above `CT_DRAIN_TIMEOUT`. `Ctrl-C` still stops imm
 
 You can also run ct-monitor using the official Docker image from Docker Hub.
 
+> ⚠️ The Docker Hub image is still version **1.3.0** (September 2025). It has none of the 1.4.0 changes
+> above. To run the current code, build the image from this repository and use `ct-monitor` in place of
+> `jonaslejon/ct-monitor:latest` in the examples below:
+>
+> ```bash
+> docker build -t ct-monitor .
+> ```
+
 ### Pull the image
 
 ```bash
@@ -162,7 +188,7 @@ docker run --rm -it -v $(pwd)/.env:/app/.env jonaslejon/ct-monitor:latest --es-o
 python3 ct-monitor.py -q -m "github" -n 5000 > domains.json
 
 # Verbose debugging
-python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/xenon2025/ -n 100
+python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/eu1/xenon2026h2/ -n 100
 
 # Find email-containing certificates
 python3 ct-monitor.py -q -n 10000 | jq 'select(.email != null)'
@@ -192,8 +218,14 @@ python3 ct-monitor.py --es-output -n 5000
 | `--es-output` | Output to Elasticsearch instead of stdout | False |
 | `--dns-resolve` | Enable DNS resolution for discovered domains | False |
 | `--dns-public` | Use public DNS resolvers with round-robin | False |
-| `--dns-workers` | Number of concurrent DNS resolution workers | 20 |
-| `--dns-cache-size` | DNS cache size for deduplication | 10000 |
+| `--dns-workers` | DNS concurrency: each of the 4 resolver threads keeps 2 × this many lookups in flight | 20 |
+| `--dns-cache-size` | Host names kept in the DNS answer cache (15 minutes) | 10000 |
+| `--new-fetcher-logs` | Use the gap-free fetcher for logs whose URL contains any of these comma-separated substrings, or `all` | None |
+| `--fetch-workers` | Parallel ranges per log for the gap-free fetcher, e.g. `argon2026h2=4` | 1 |
+| `--state-file` | Persist each log's position here and resume from it after a restart | None |
+| `--max-backlog` | On start, skip ahead if a saved position is further behind than this | 2000000 |
+| `--logs` | Only monitor logs whose URL contains any of these comma-separated substrings | All logs |
+| `--exclude-logs` | Skip logs whose URL contains any of these comma-separated substrings | None |
 
 ## 📊 Output Format
 
@@ -203,13 +235,17 @@ The tool outputs JSON lines with certificate information:
 {
   "name": "example.com",
   "ts": 1750518406484,
-  "cn": "example.com", 
+  "cn": "example.com",
   "sha1": "abc123...",
-  "dns": ["example.com", "www.example.com"],
+  "dns": ["www.example.com"],
   "email": ["admin@example.com"],
-  "ip": ["192.168.1.1"]
+  "ip": ["192.168.1.1"],
+  "ik": "3f1c…:4b2e…",
+  "pc": false
 }
 ```
+
+One line is written per name in the certificate.
 
 ### Output Fields
 
@@ -217,9 +253,11 @@ The tool outputs JSON lines with certificate information:
 - **ts**: Certificate timestamp (milliseconds)
 - **cn**: Common Name from certificate subject
 - **sha1**: SHA1 hash of certificate
-- **dns**: All DNS names from certificate (optional)
-- **email**: Email addresses from certificate (optional)  
+- **dns**: The certificate's other DNS names, without `name` itself (optional)
+- **email**: Email addresses from certificate (optional)
 - **ip**: IP addresses from certificate (optional)
+- **ik**: Issuer + serial number. A precertificate and its final certificate share it
+- **pc**: `true` for a precertificate
 
 ## 🎯 Use Cases
 
@@ -268,17 +306,19 @@ python3 ct-monitor.py --es-output -n 10000  # Batch to ES
 
 ### Current CT Log Issues (2025)
 
-Many CT logs, especially Sectigo's, are experiencing severe rate limiting:
+Many CT logs rate-limit readers, some per log rather than per address:
 
 - **Sectigo logs**: 20 req/sec per IP, 400 req/sec global limit
 - **High error rates**: Some logs have availability below the recommended 99%
-- **Recommended**: Use higher `-p` values (30-60 seconds) for Sectigo logs
+- **Recommended**: Use higher `-p` values (30-60 seconds) for Sectigo logs with the classic fetch loop
+- **Gap-free fetcher**: a 429, 503 or 504 makes only that range back off (2 s, doubling to 60 s, with
+  jitter); the log is never given up
 
 ### Optimization Tips
 
 ```bash
 # Avoid problematic logs
-python3 ct-monitor.py -l https://ct.googleapis.com/logs/xenon2025/ -n 5000
+python3 ct-monitor.py -l https://ct.googleapis.com/logs/eu1/xenon2026h2/ -n 5000
 
 # Use higher poll intervals for rate-limited logs
 python3 ct-monitor.py -p 60 -f
@@ -294,9 +334,9 @@ The tool provides comprehensive statistics:
 ```
 📊 Final Statistics:
   🎯 Total entries processed: 15000
-  ✅ Valid certificates: 9500 (63.3%)
-    ❌ Parse errors: 5500 (36.7%)
-  🎯 Pattern matches: 25 (0.3% of valid certs)
+  ✅ Valid certificates: 14985 (99.9%)
+  ❌ Parse errors: 15 (0.1%)
+  🎯 Pattern matches: 25 (0.2% of valid certs)
   ⚠️ Rate limited logs: 8 (consider using -p with higher value)
 ```
 
@@ -313,9 +353,9 @@ The tool gracefully handles:
 
 ### Common Issues
 
-**High parse error rates**: 
-- Normal for CT logs (a small percentage of failure is typical)
-- Precertificates are harder to parse than regular certificates
+**High parse error rates**:
+- The classic fetch loop skips precertificates, and many CAs log some certificates only as a
+  precertificate. Use the gap-free fetcher (`--new-fetcher-logs all`), which parses them.
 
 **Rate limiting errors**:
 ```bash
@@ -323,7 +363,7 @@ The tool gracefully handles:
 python3 ct-monitor.py -p 30
 
 # Monitor specific logs instead of all
-python3 ct-monitor.py -l https://ct.googleapis.com/logs/xenon2025/
+python3 ct-monitor.py -l https://ct.googleapis.com/logs/eu1/xenon2026h2/
 ```
 
 **No pattern matches**:
@@ -342,14 +382,14 @@ python3 ct-monitor.py -m "microsoft" -n 2000
 python3 ct-monitor.py -v -n 50
 
 # Check specific certificate details
-python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/xenon2025/ -n 10
+python3 ct-monitor.py -v -l https://ct.googleapis.com/logs/eu1/xenon2026h2/ -n 10
 ```
 
 ## ⚡ Adaptive Rate Limiting
 
 ### Overview
 
-The CT monitor implements intelligent per-server rate limiting that automatically adapts to each CT log server's behavior:
+The CT monitor implements intelligent per-server rate limiting that automatically adapts to each CT log server's behavior. The batch and poll-interval steps below apply to the classic fetch loop. The gap-free fetcher backs off per request instead (see Rate Limiting & Performance), and the circuit breaker applies to both:
 
 ### Features
 
@@ -392,11 +432,13 @@ The DNS resolution feature automatically resolves discovered domains to IP addre
 
 ### Features
 
-- **Async Resolution**: High-performance DNS lookups with configurable concurrency
-- **Smart Caching**: LRU cache prevents redundant queries
-- **SAN Resolution**: Automatically resolves Subject Alternative Names from certificates
-- **Wildcard Expansion**: Expands `*.example.com` to common subdomains (www, mail, api, etc.)
+- **Continuous async resolution**: Each resolver thread keeps a fixed number of lookups in flight
+- **Host cache**: An LRU cache keyed by host name avoids repeated queries
+- **Once per certificate**: With `--es-output`, a name is resolved when its certificate document is
+  first created that day, not again for every log or for a final certificate replacing its precertificate
+- **Wildcards**: `*.example.com` resolves `example.com` only. No subdomains are guessed.
 - **Public DNS Round-Robin**: Distributes queries across 6 major DNS providers to avoid rate limits
+- **Status**: A `🔎 DNS:` line every 60 seconds (queue, drops, lookups per second, cache hit rate)
 - **Elasticsearch Storage**: Time-based indices with certificate linkage for security analysis
 
 ### Local DNS Resolver (Unbound/BIND)
@@ -468,7 +510,8 @@ python3 ct-monitor.py --es-output --dns-resolve --dns-public -f
 
 DNS results are stored in daily `ct-dns-YYYY-MM-DD` indices with:
 - **Bidirectional lookups**: Query by domain or IP
-- **Certificate linkage**: Track which certificates use which IPs
+- **Certificate linkage**: `c` is the SHA-1 of the certificate in which the name was first seen that day
+- **Lookup outcome**: `e` is `nxdomain`, `noanswer` (no A record), `timeout`, `servfail` or `unknown` when the lookup failed
 - **Compact storage**: ~50-80 bytes per record with compression
 - **Deduplication**: Hash-based prevention of duplicate entries
 
@@ -497,8 +540,8 @@ curl -X GET "localhost:9200/ct-dns-*/_search" -H 'Content-Type: application/json
 ### Performance & Rate Limiting
 
 - **Round-robin distribution** prevents rate limiting from any single DNS provider
-- **Batch processing** groups domains for efficient resolution
-- **Async resolution** enables high throughput (100+ lookups/second)
+- **Continuous resolution**: a slow or timed-out lookup does not hold back the others
+- **Async resolution** enables high throughput (hundreds of lookups per second against a local resolver)
 - **Cache prevents** redundant queries for recently resolved domains
 
 ### Use Cases
@@ -573,27 +616,14 @@ python3 ct-monitor.py --es-output --timeout 60 -n 5000
 
 ### 💾 Elasticsearch Storage Requirements & Efficiency
 
-Based on production Elasticsearch data analysis with full SAN storage:
+Measured in production in late September 2026, following every RFC 6962 log in Chrome's list with
+the gap-free fetcher:
 
-**Compression Efficiency**:
-- **156 bytes per domain** (including full SAN lists)
-- **6.88 million domains per GB**
-- **0.15 GB per million domains**
+- **~160 bytes per document**, including the full SAN list
+- **~37 million documents per day** (one per domain and issued certificate), **~6 GB per day**
+- Daily volume varies with CA issuance, and roughly doubles while a large backlog is being caught up
 
-**Daily Storage** (average):
-- **~7.15 million domains/day**
-- **~1.04 GB/day**
-
-**Projected Storage Needs**:
-- **Weekly**: 50M domains, 7.3 GB
-- **Monthly**: 215M domains, 31.2 GB
-- **Yearly**: 2.61B domains, 379 GB
-
-**Key Insights**:
-- ✅ **Excellent Elasticsearch compression**: 156 bytes/domain with complete certificate data
-- ✅ **High variability**: Daily volumes can fluctuate significantly (200%+ observed)
-- ✅ **Cost-effective**: ~$38/month for 1TB Elasticsearch storage covers yearly data
-- ✅ **Scalable**: Elasticsearch schema supports billions of domains efficiently
+Plan disk for the retention you want: 90 days at that rate is roughly 0.55 TB, before replicas.
 
 ## ⚠️ Limitations
 
@@ -619,6 +649,10 @@ pip install -r requirements.txt
 ### Running Tests
 
 ```bash
+# Unit tests
+python3 -m pytest test_ct-monitor.py test_fetcher.py test_precert.py test_es_retry_cap.py \
+    test_split_drain.py test_dns_pipeline.py
+
 # Test basic functionality
 python3 ct-monitor.py -n 10
 
@@ -626,7 +660,7 @@ python3 ct-monitor.py -n 10
 python3 ct-monitor.py -m "test" -n 50
 
 # Test rate limiting handling
-python3 ct-monitor.py -l https://mammoth2025h1.ct.sectigo.com/ -n 100
+python3 ct-monitor.py -l https://tiger2026h2.ct.sectigo.com/ -n 100
 ```
 
 ## 📋 TODO & Future Enhancements
@@ -634,14 +668,12 @@ python3 ct-monitor.py -l https://mammoth2025h1.ct.sectigo.com/ -n 100
 ### Current Limitations
 - **No automatic cleanup**: Older certificate entries are not automatically removed from Elasticsearch
 - **Manual index management**: Users need to manually manage index retention and cleanup
-- **No deduplication**: Certificates may be stored multiple times if they appear in different CT logs
 
 ### Planned Features
 
 **Core Enhancements**:
 - **Automatic retention policies**: Configurable TTL for certificate data
 - **Index lifecycle management**: Automated index rotation and deletion
-- **Deduplication**: Prevent storing duplicate certificates across logs
 - **Compression optimization**: Further storage efficiency improvements
 - **Cluster support**: Distributed Elasticsearch cluster support
 
@@ -661,7 +693,6 @@ python3 ct-monitor.py -l https://mammoth2025h1.ct.sectigo.com/ -n 100
 - **Domain categorization**: Automated domain classification
 
 **Operational Improvements**:
-- **Docker containerization**: Easy deployment
 - **Configuration files**: YAML/JSON config support
 - **Performance metrics**: Prometheus/Grafana integration
 - **Historical backfilling**: Import historical CT data
