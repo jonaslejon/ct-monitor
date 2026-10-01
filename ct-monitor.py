@@ -36,6 +36,7 @@ import sys
 import time
 import threading
 import queue
+import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from datetime import datetime
 from typing import List, Dict, Optional, Set, Tuple
@@ -440,6 +441,12 @@ class HTTPClient:
             time.sleep(remaining)
 
 
+class GracefulShutdown(BaseException):
+    """Raised in the main thread by SIGTERM: stop fetching, finish what is queued, then exit.
+
+    A BaseException (like KeyboardInterrupt) so no `except Exception` on the way swallows it."""
+
+
 class CTLogMonitor:
     """Certificate Transparency Log Monitor"""
     
@@ -450,7 +457,8 @@ class CTLogMonitor:
                  dns_resolve: bool = False, dns_workers: int = 20, dns_cache_size: int = 10000,
                  dns_public: bool = False, state_file: Optional[str] = None,
                  new_fetcher_logs: Optional[str] = None, fetch_workers: Optional[str] = None,
-                 max_backlog: int = 2_000_000):
+                 max_backlog: int = 2_000_000,
+                 include_logs: Optional[str] = None, exclude_logs: Optional[str] = None):
         self.log_url = log_url
         self.tail_count = tail_count
         self.poll_time = poll_time
@@ -472,6 +480,8 @@ class CTLogMonitor:
                 key, _, value = item.partition('=')
                 self.fetch_workers[key.strip()] = max(1, int(value))
         self.max_backlog = max_backlog
+        self.include_logs = include_logs
+        self.exclude_logs = exclude_logs
         self.position_store = PositionStore(state_file)
 
         # Initialize components
@@ -544,6 +554,11 @@ class CTLogMonitor:
         self.input_queue = queue.Queue(maxsize=queue_max)
         self.output_queue = queue.Queue(maxsize=queue_max)
         self.shutdown_event = threading.Event()
+        # Fetchers stop on this; workers and the writer stop on shutdown_event. A graceful stop sets
+        # this first and drains the queues; every full stop sets both.
+        self.fetch_stop_event = threading.Event()
+        self.draining = False
+        self._log_futures = []
         self.is_shutting_down = False  # Track if we're already shutting down
 
         # Initialize public suffix list
@@ -878,21 +893,20 @@ class CTLogMonitor:
         while not self.shutdown_event.is_set():
             try:
                 entry = self.input_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            try:
                 if entry is None:  # Shutdown signal
                     break
-                    
                 results = self.process_certificate(entry)
                 for result in results:
                     self._put(self.output_queue, result)
-                    qs = self.output_queue.qsize()
-                    
-                self.input_queue.task_done()
-                    
-            except queue.Empty:
-                continue
             except Exception as e:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 self.logger.error(f"[{timestamp}] ⚠️ Worker thread error: {e}")
+            finally:
+                # Always: graceful_drain waits on unfinished_tasks, so a skipped task_done would hang it.
+                self.input_queue.task_done()
     
     def output_thread(self):
         """Output thread to write results as JSON"""
@@ -901,9 +915,10 @@ class CTLogMonitor:
         while not self.shutdown_event.is_set():
             try:
                 # Use non-blocking get to avoid queue.get() hang bug
-                qs = self.output_queue.qsize()
+                got = False
                 try:
                     result = self.output_queue.get_nowait()
+                    got = True
                 except queue.Empty:
                     time.sleep(0.1)  # Brief sleep before next iteration
                     continue
@@ -978,6 +993,8 @@ class CTLogMonitor:
             except Exception as e:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 self.logger.error(f"[{timestamp}] ⚠️ Output thread error: {e}")
+                if got:
+                    self.output_queue.task_done()  # keep unfinished_tasks honest for graceful_drain
     
     def _get_domain_type_emoji(self, name: str) -> str:
         """Get appropriate emoji for domain type"""
@@ -1013,7 +1030,7 @@ class CTLogMonitor:
         try:
             while True:
                 # Check shutdown at start of loop
-                if self.shutdown_event.is_set():
+                if self.shutdown_event.is_set() or self.fetch_stop_event.is_set():
                     self.logger.debug(f"🛑 Shutdown event detected for {log_url}")
                     return
                 if iteration > 0:
@@ -1130,6 +1147,60 @@ class CTLogMonitor:
                 continue
         return False
 
+    @staticmethod
+    def filter_logs(logs: List[str], include: Optional[str], exclude: Optional[str]) -> List[str]:
+        """--logs keeps logs whose URL contains any listed substring; --exclude-logs then drops
+        those that contain one. Lets several processes split the logs (one CPU core each)."""
+        inc = [x.strip() for x in (include or '').split(',') if x.strip()]
+        exc = [x.strip() for x in (exclude or '').split(',') if x.strip()]
+        kept = [u for u in logs if not inc or any(x in u for x in inc)]
+        return [u for u in kept if not any(x in u for x in exc)]
+
+    def graceful_drain(self, timeout: float) -> bool:
+        """SIGTERM path: stop fetching, let the workers and the writer finish everything already
+        queued, then save the cursors.
+
+        The saved cursor counts ENQUEUED entries, so an instant stop loses whatever sits in the
+        queues (up to CT_QUEUE_MAX entries plus their results). Draining first makes a planned
+        restart lossless. Returns False if the deadline passed with work still queued."""
+        started = time.monotonic()
+        deadline = started + timeout
+        self.fetch_stop_event.set()
+        self.logger.warning(f"🛑 Graceful stop: draining {self.input_queue.unfinished_tasks:,} queued "
+                            f"entries and {self.output_queue.unfinished_tasks:,} results "
+                            f"(deadline {timeout:.0f}s)", force=True)
+        for fut in self._log_futures:
+            try:
+                fut.result(timeout=max(0.1, deadline - time.monotonic()))
+            except TimeoutError:
+                break
+            except Exception:
+                pass
+
+        def pending():
+            dns = 0
+            if self.dns_resolve and self.dns_resolver_thread:
+                st = self.dns_resolver_thread.get_stats()
+                dns = st.get('queue_size', 0) + st.get('active_workers', 0)
+            return self.input_queue.unfinished_tasks, self.output_queue.unfinished_tasks, dns
+
+        left = pending()
+        while any(left) and time.monotonic() < deadline:
+            if not left[0] and not left[1] and left[2] and self.dns_resolver_thread:
+                # The DNS queue flushes only when a domain is added; nothing is added any more.
+                self.dns_resolver_thread._trigger_flush()
+            time.sleep(0.2)
+            left = pending()
+        self.position_store.flush(force=True)
+        if any(left):
+            self.logger.warning(f"⚠️ Graceful stop deadline passed with {left[0]:,} entries, {left[1]:,} "
+                                f"results and {left[2]:,} DNS lookups still queued; those are lost",
+                                force=True)
+            return False
+        self.logger.warning(f"✅ Graceful stop: queues drained in {time.monotonic() - started:.1f}s, "
+                            f"cursors saved", force=True)
+        return True
+
     def _enqueue_v2(self, entry: Dict) -> None:
         entry['_v2'] = True  # enables precert parsing for this entry (see parse_certificate_entry)
         self._put(self.input_queue, entry)
@@ -1157,8 +1228,8 @@ class CTLogMonitor:
             on_entry=self._enqueue_v2,
             workers=workers,
             retry_sleep=self.poll_time / 6,
-            shutdown_event=self.shutdown_event,
-            sleep=lambda secs: self.http_client._interruptible_sleep(secs, self.shutdown_event),
+            shutdown_event=self.fetch_stop_event,
+            sleep=lambda secs: self.http_client._interruptible_sleep(secs, self.fetch_stop_event),
         )
         cursor = self.position_store.get(log_url)
         first = True
@@ -1167,12 +1238,12 @@ class CTLogMonitor:
         behind = False
         self.logger.warning(f"🧭 Gap-free fetcher for {log_url} (workers={workers}, "
                             f"saved cursor={cursor})", force=True)
-        while not self.shutdown_event.is_set():
+        while not self.fetch_stop_event.is_set():
             try:
                 if not first and not behind:
                     self.http_client._interruptible_sleep(
-                        self.rate_limiter.get_poll_interval(log_url), self.shutdown_event)
-                    if self.shutdown_event.is_set():
+                        self.rate_limiter.get_poll_interval(log_url), self.fetch_stop_event)
+                    if self.fetch_stop_event.is_set():
                         break
                 first_pass, first = first, False
 
@@ -1243,6 +1314,15 @@ class CTLogMonitor:
                 self.logger.success(f"🎯 Monitoring single log: {self.log_url}")
             else:
                 logs = self.get_all_logs()
+                if self.include_logs or self.exclude_logs:
+                    logs = self.filter_logs(logs, self.include_logs, self.exclude_logs)
+                    self.logger.warning(f"🗂️ Log selection (--logs {self.include_logs!r}, --exclude-logs "
+                                        f"{self.exclude_logs!r}): {len(logs)} log(s): {', '.join(logs)}",
+                                        force=True)
+                    if not logs:
+                        self.logger.error("💀 No CT log matches --logs/--exclude-logs; refusing to run "
+                                          "with nothing to monitor")
+                        return 2
 
             # Show pattern info
             if self.pattern:
@@ -1275,6 +1355,7 @@ class CTLogMonitor:
             executor = ThreadPoolExecutor(max_workers=len(logs))
             try:
                 futures = [executor.submit(self.monitor_log, log_url) for log_url in logs]
+                self._log_futures = futures
 
                 # Wait for completion or interruption
                 last_retry_time = time.time()
@@ -1289,6 +1370,7 @@ class CTLogMonitor:
                         # Check timeout if specified
                         if self.timeout_minutes and time.time() - self.start_time >= timeout_seconds:
                             self.logger.info(f"⏰ Timeout reached after {self.timeout_minutes} minutes, shutting down...")
+                            self.fetch_stop_event.set()
                             self.shutdown_event.set()
                             # Cancel remaining futures
                             for f in futures:
@@ -1325,9 +1407,14 @@ class CTLogMonitor:
                 # Shutdown executor immediately without waiting for tasks to complete
                 executor.shutdown(wait=False)
             
+        except GracefulShutdown:
+            self.is_shutting_down = True
+            drained = self.graceful_drain(float(os.getenv('CT_DRAIN_TIMEOUT', '150')))
+            exit_code = 0 if drained else 3
         except KeyboardInterrupt:
             if not self.is_shutting_down:
                 self.is_shutting_down = True
+                self.fetch_stop_event.set()
                 self.shutdown_event.set()  # Signal all threads to stop
                 self.logger.warning("\n🛑 Interrupt received, exiting...", force=True)
             else:
@@ -1340,6 +1427,7 @@ class CTLogMonitor:
             exit_code = 1
         finally:
             # Signal shutdown to all threads and print stats
+            self.fetch_stop_event.set()
             self.shutdown_event.set()
             self.is_shutting_down = True
 
@@ -1476,6 +1564,11 @@ def main():
                             'comma-separated substrings, or "all"')
     parser.add_argument('--fetch-workers', metavar='MAP',
                        help='Parallel ranges per log for the gap-free fetcher, e.g. "argon2026h2=4"')
+    parser.add_argument('--logs', metavar='SUBSTRINGS',
+                       help='Only monitor logs whose URL contains any of these comma-separated '
+                            'substrings (with --exclude-logs, lets several processes share the logs)')
+    parser.add_argument('--exclude-logs', metavar='SUBSTRINGS',
+                       help='Skip logs whose URL contains any of these comma-separated substrings')
     parser.add_argument('--max-backlog', type=int, default=2_000_000,
                        help='On start, skip ahead if the saved position is further behind than this '
                             '(default: 2000000)')
@@ -1536,9 +1629,20 @@ def main():
         state_file=args.state_file,
         new_fetcher_logs=args.new_fetcher_logs,
         fetch_workers=args.fetch_workers,
-        max_backlog=args.max_backlog
+        max_backlog=args.max_backlog,
+        include_logs=args.logs,
+        exclude_logs=args.exclude_logs
     )
-    
+
+    def _on_sigterm(signum, frame):
+        # Raise in the main thread, as Ctrl-C does, so run() drains the queues before exiting.
+        # A second SIGTERM while draining is ignored; systemd's TimeoutStopSec bounds the stop.
+        if monitor.draining:
+            return
+        monitor.draining = True
+        raise GracefulShutdown()
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     return monitor.run()
 
 
