@@ -122,6 +122,44 @@ class DrainTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(mon.output_queue.unfinished_tasks, 0)
 
+    def test_drain_waits_for_the_dns_queue_and_flushes_it(self):
+        self.mon = mon = _mon()
+
+        class FakeDNS:
+            def __init__(self):
+                self.queue, self.flushes = 30, 0
+
+            def get_queue_stats(self):
+                return {'queue_size': self.queue, 'active_workers': 0}
+
+            def _trigger_flush(self):
+                self.flushes += 1
+                self.queue = max(0, self.queue - 10)
+        mon.dns_resolve, mon.dns_resolver_thread = True, FakeDNS()
+        self.assertTrue(mon.graceful_drain(10))
+        self.assertEqual(mon.dns_resolver_thread.queue, 0)
+        self.assertGreaterEqual(mon.dns_resolver_thread.flushes, 3)
+
+    def test_an_unreadable_dns_queue_does_not_abort_the_drain(self):
+        self.mon = mon = _mon()
+
+        class BrokenDNS:
+            def get_queue_stats(self):
+                raise RuntimeError('no stats')
+        mon.dns_resolve, mon.dns_resolver_thread = True, BrokenDNS()
+        mon.process_certificate = lambda e: []
+        for i in range(20):
+            mon.input_queue.put({'i': i})
+        self._start(mon)
+        self.assertTrue(mon.graceful_drain(10))
+        self.assertEqual(mon.input_queue.unfinished_tasks, 0)
+
+    def test_the_real_dns_thread_has_the_methods_the_drain_calls(self):
+        # Wiring: the 2026-10-01 production drain crashed calling a method DNSResolverThread lacks.
+        import dns_resolver
+        for name in ('get_queue_stats', '_trigger_flush'):
+            self.assertTrue(callable(getattr(dns_resolver.DNSResolverThread, name, None)), name)
+
     def test_gap_free_fetcher_stops_on_fetch_stop_alone(self):
         # follow=True: without it monitor_log_v2 makes one pass and returns whatever the stop logic does
         self.mon = mon = ctm.CTLogMonitor(quiet=True, follow=True)

@@ -1177,11 +1177,19 @@ class CTLogMonitor:
             except Exception:
                 pass
 
+        dns_unreadable = []
+
         def pending():
             dns = 0
-            if self.dns_resolve and self.dns_resolver_thread:
-                st = self.dns_resolver_thread.get_stats()
-                dns = st.get('queue_size', 0) + st.get('active_workers', 0)
+            if self.dns_resolve and self.dns_resolver_thread and not dns_unreadable:
+                try:
+                    st = self.dns_resolver_thread.get_queue_stats()
+                    dns = st.get('queue_size', 0) + st.get('active_workers', 0)
+                except Exception as e:
+                    # Never let a stats problem abort the drain: stop waiting on DNS and say so.
+                    dns_unreadable.append(e)
+                    self.logger.warning(f"⚠️ Graceful stop: cannot read the DNS queue ({e}); "
+                                        f"not waiting for pending DNS lookups", force=True)
             return self.input_queue.unfinished_tasks, self.output_queue.unfinished_tasks, dns
 
         left = pending()
