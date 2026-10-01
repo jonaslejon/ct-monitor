@@ -103,15 +103,17 @@ A selection that matches no log exits with code 2 instead of running idle.
 ### Stopping without losing entries
 
 The saved position counts entries that have been fetched and queued. On `SIGTERM` the monitor stops
-fetching, lets the workers and the writer finish everything already queued (including pending DNS
-lookups), saves the positions, and exits. A restart therefore resumes without a gap. If the queues are
-not empty after `CT_DRAIN_TIMEOUT` seconds, it logs what is left and exits with code 3. Under systemd, set
-`TimeoutStopSec` above `CT_DRAIN_TIMEOUT`. `Ctrl-C` still stops immediately.
+fetching, lets the workers and the writer finish everything already queued, saves the positions, and
+exits. A restart therefore resumes without a gap. If entries or results are still queued after
+`CT_DRAIN_TIMEOUT` seconds, it logs what is left and exits with code 3. Pending DNS lookups are best
+effort: the stop gives them `CT_DRAIN_DNS_TIMEOUT` seconds and reports how many were not done. Under
+systemd, set `TimeoutStopSec` above `CT_DRAIN_TIMEOUT`. `Ctrl-C` still stops immediately.
 
 | Environment variable | Default | Meaning |
 |---|---|---|
 | `CT_QUEUE_MAX` | 100000 | Size of the input and output queues. Fetching pauses while they are full, so memory stays bounded. Smaller queues drain faster on stop |
-| `CT_DRAIN_TIMEOUT` | 150 | Seconds a `SIGTERM` stop waits for the queues to drain |
+| `CT_DRAIN_TIMEOUT` | 150 | Seconds a `SIGTERM` stop waits for queued entries and results |
+| `CT_DRAIN_DNS_TIMEOUT` | 10 | Seconds a `SIGTERM` stop then waits for pending DNS lookups |
 | `CT_ES_RETRY_MAX_DOCS` | 200000 | Documents held for an Elasticsearch retry before the writer pauses |
 
 ## 🐳 Docker Usage
