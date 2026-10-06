@@ -86,8 +86,8 @@ failed, and can persist each log's position so a restart resumes where it stoppe
 It is enabled per log, so it can be rolled out gradually:
 
 ```bash
-# Gap-free fetching for one log, 4 parallel ranges, resume from a state file
-python3 ct-monitor.py -f --new-fetcher-logs argon2026h2 --fetch-workers argon2026h2=4 \
+# Gap-free fetching for every Argon shard, 4 parallel ranges each, resume from a state file
+python3 ct-monitor.py -f --new-fetcher-logs argon --fetch-workers argon=4 \
     --state-file state/positions.json
 
 # All logs
@@ -97,11 +97,21 @@ python3 ct-monitor.py -f --new-fetcher-logs all --state-file state/positions.jso
 | Option | Meaning |
 |---|---|
 | `--new-fetcher-logs` | Comma-separated substrings of log URLs, or `all` |
-| `--fetch-workers` | Parallel ranges per log, e.g. `argon2026h2=4,xenon2026h2=4` (default 1) |
+| `--fetch-workers` | Parallel ranges per log, e.g. `argon=16,xenon=4`; each key is a substring of the log URL (default 1) |
 | `--state-file` | Where to persist each log's position |
 | `--max-backlog` | On start, skip ahead if the saved position is further behind than this (default 2,000,000) |
 | `--logs` | Only monitor logs whose URL contains any of these comma-separated substrings |
 | `--exclude-logs` | Skip logs whose URL contains any of these comma-separated substrings |
+
+> ⚠️ **Key `--fetch-workers` by log family (`argon=16`), not by shard (`argon2026h2=4`).** A key is matched as a
+> substring of the log URL, and a log that no key matches is fetched on ONE range. Logs are sharded by certificate
+> expiry and a new shard opens every half-year, so a shard key leaves the newest shard, which receives most new
+> certificates, on a single range. That is how `argon2027h1` fell tens of millions of entries behind in October 2026:
+> one range fetched ~26 entries/s while the log grew ~250/s.
+>
+> ⚠️ **`--max-backlog` skips for good.** Before restarting, compare each log's saved position with its live
+> `get-sth` tree size; a log further behind than `--max-backlog` loses the difference on start. Raise the limit
+> first if those entries matter.
 
 ### Splitting the logs across processes
 
@@ -221,7 +231,7 @@ python3 ct-monitor.py --es-output -n 5000
 | `--dns-workers` | DNS concurrency: each of the 4 resolver threads keeps 2 × this many lookups in flight | 20 |
 | `--dns-cache-size` | Host names kept in the DNS answer cache (15 minutes) | 10000 |
 | `--new-fetcher-logs` | Use the gap-free fetcher for logs whose URL contains any of these comma-separated substrings, or `all` | None |
-| `--fetch-workers` | Parallel ranges per log for the gap-free fetcher, e.g. `argon2026h2=4` | 1 |
+| `--fetch-workers` | Parallel ranges per log for the gap-free fetcher, e.g. `argon=16` (a URL substring: key by log family, not shard) | 1 |
 | `--state-file` | Persist each log's position here and resume from it after a restart | None |
 | `--max-backlog` | On start, skip ahead if a saved position is further behind than this | 2000000 |
 | `--logs` | Only monitor logs whose URL contains any of these comma-separated substrings | All logs |
