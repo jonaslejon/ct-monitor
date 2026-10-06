@@ -142,6 +142,76 @@ class ContinuousTest(unittest.TestCase):
         self.assertEqual(t.resolved_total, 510)
         self.assertEqual(t.active_workers, 0)      # all slots ended after the idle period
 
+    def test_concurrency_recovers_after_a_trickle_longer_than_the_idle_window(self):
+        # Production 2026-10-06: after days of a trickle (argon: 3-13 names/s), each slot went more
+        # than SLOT_IDLE_SECONDS without an item of its own and ended, while the worker stayed active
+        # on the few that kept getting one. When the backlog came back, every unit ran 4-9 lookups at
+        # once against a cap of 400, and the 1M queues dropped ~84M names in five days.
+        t = _thread(max_concurrent=50, num_workers=1)
+        t.SLOT_IDLE_SECONDS = 0.5
+        inflight = {'now': 0, 'peak': 0}
+
+        async def fake(name, sha1=None):
+            inflight['now'] += 1
+            inflight['peak'] = max(inflight['peak'], inflight['now'])
+            await asyncio.sleep(0.2)
+            inflight['now'] -= 1
+            return DNSResult(domain=name, ips=[], cert_sha1=sha1)
+        t.resolver.resolve_domain_async = fake
+        t.queue.append(('trickle0.example', 'c'))
+        with t.workers_lock:
+            t.active_workers += 1
+        th = threading.Thread(target=t._run_batch_resolution, daemon=True)
+        th.start()
+        for i in range(1, 13):               # one name every 0.25 s for 3 s: longer than the idle window
+            time.sleep(0.25)
+            t.queue.append((f'trickle{i}.example', 'c'))
+        inflight['peak'] = 0
+        for i in range(500):
+            t.queue.append((f'burst{i}.example', 'c'))
+        time.sleep(1.0)
+        self.assertGreaterEqual(inflight['peak'], 40)   # was 1-2: only the slots the trickle kept fed
+        th.join(15)
+        self.assertEqual(t.resolved_total, 513)
+        self.assertEqual(t.active_workers, 0)
+
+    def test_an_idle_worker_does_not_spin(self):
+        # Slots that end on an empty queue must not be replaced by busy-polling ones.
+        t = _thread(max_concurrent=100, num_workers=1)
+        t.SLOT_IDLE_SECONDS = 1.0
+        t.queue.append(('only.example', 'c'))
+
+        async def fake(name, sha1=None):
+            return DNSResult(domain=name, ips=[], cert_sha1=sha1)
+        t.resolver.resolve_domain_async = fake
+        with t.workers_lock:
+            t.active_workers += 1
+        c0 = time.process_time()
+        t._run_batch_resolution()
+        self.assertLess(time.process_time() - c0, 0.3)
+        self.assertEqual(t.resolved_total, 1)
+        self.assertEqual(t.active_workers, 0)
+
+    def test_shutdown_ends_the_worker_with_names_still_queued(self):
+        t = _thread(max_concurrent=5, num_workers=1)
+
+        async def fake(name, sha1=None):
+            await asyncio.sleep(0.05)
+            return DNSResult(domain=name, ips=[], cert_sha1=sha1)
+        t.resolver.resolve_domain_async = fake
+        for i in range(10000):
+            t.queue.append((f'h{i}.example', 'c'))
+        with t.workers_lock:
+            t.active_workers += 1
+        th = threading.Thread(target=t._run_batch_resolution, daemon=True)
+        th.start()
+        time.sleep(0.3)
+        t.shutting_down = True
+        th.join(3)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(t.active_workers, 0)
+        self.assertGreater(len(t.queue), 0)
+
     def test_an_exception_does_not_kill_the_slot(self):
         t = _thread(max_concurrent=1, num_workers=1)
 

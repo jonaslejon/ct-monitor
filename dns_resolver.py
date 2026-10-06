@@ -624,25 +624,29 @@ class DNSResolverThread:
         with self.queue_lock:
             return self.queue.popleft() if self.queue else None
 
-    # A slot that finds the queue empty waits for more work and ends only after this long idle. Ending at
-    # the first empty moment let the slots die off one by one under bursty arrivals, while the worker still
-    # counted as active so no new one started: production ran 1-13 lookups in flight instead of 400.
+    # The worker ends after the queue has been empty this long; a new one starts on the next names.
     SLOT_IDLE_SECONDS = 5.0
 
     async def _consume(self):
+        """Keep max_concurrent lookups in flight whenever names are queued.
+
+        A slot ends as soon as it finds the queue empty, and this loop starts new slots whenever names
+        are queued again, so concurrency follows the work instead of decaying. Two earlier designs
+        decayed: slots that ended at the first empty moment (1-13 in flight instead of 400 on
+        2026-10-01), and then slots that ended after SLOT_IDLE_SECONDS without an item OF THEIR OWN.
+        Under a trickle (3-13 names/s for days) most slots went that long without one and ended,
+        while the worker still counted as active on the few the trickle kept fed. When a backlog
+        came back, every unit ran 4-9 lookups at once and the 1M queues dropped ~84M names between
+        2026-10-01 and 10-06."""
+        target = max(1, self.resolver.max_concurrent)
+        tasks = set()
+        idle_since = None
+
         async def slot():
-            idle_since = None
             while not self.shutting_down:
                 item = self._next_domain()
                 if item is None:
-                    now = time.monotonic()
-                    if idle_since is None:
-                        idle_since = now
-                    elif now - idle_since >= self.SLOT_IDLE_SECONDS:
-                        return
-                    await asyncio.sleep(0.05)
-                    continue
-                idle_since = None
+                    return
                 domain, cert_sha1 = item
                 try:
                     for name in self.resolver.names_for(domain):
@@ -650,7 +654,26 @@ class DNSResolverThread:
                         self._queue_results_for_storage([result])
                 except Exception as e:  # one bad name must not end the slot
                     self.logger.debug(f"Resolution error for {domain}: {e}")
-        await asyncio.gather(*(slot() for _ in range(max(1, self.resolver.max_concurrent))))
+
+        while True:
+            if not self.shutting_down:
+                while len(tasks) < target and self.queue:
+                    tasks.add(asyncio.ensure_future(slot()))
+            if tasks:
+                idle_since = None
+                done, tasks = await asyncio.wait(tasks, timeout=0.25, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    if not t.cancelled() and t.exception() is not None:
+                        self.logger.debug(f"DNS slot ended with {t.exception()!r}")
+                continue
+            if self.shutting_down:
+                return
+            now = time.monotonic()
+            if idle_since is None:
+                idle_since = now
+            elif now - idle_since >= self.SLOT_IDLE_SECONDS:
+                return
+            await asyncio.sleep(0.05)
 
     def _queue_results_for_storage(self, results: List[DNSResult]):
         """Queue results for async storage - non-blocking"""
