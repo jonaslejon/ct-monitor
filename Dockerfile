@@ -23,7 +23,7 @@ ENV PYTHONUNBUFFERED=1
 
 # Container metadata
 LABEL maintainer="Jonas Lejon <jonas.github@triop.se>"
-LABEL version="1.2.0"
+LABEL version="1.4.0"
 LABEL description="Certificate Transparency Log Monitor"
 LABEL org.opencontainers.image.source="https://github.com/jonaslejon/ct-monitor"
 
@@ -43,15 +43,15 @@ ENV PATH="/home/appuser/.local/bin:${PATH}"
 COPY --chown=appuser:appuser ct-monitor.py fetcher.py rate_limiter.py elasticsearch_output.py dns_resolver.py dns_elasticsearch.py ./
 COPY --chown=appuser:appuser .env.example .
 
-# Make the script executable
-RUN chmod +x ct-monitor.py
+# Make the script executable, and let appuser write --state-file into /data
+RUN chmod +x ct-monitor.py && mkdir -p /data && chown appuser:appuser /data
 
 # Switch to the non-privileged user
 USER appuser
 
-# Health check for long-running containers
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import requests; requests.get('http://localhost:9200', timeout=5)" || exit 1
+# No HEALTHCHECK: Elasticsearch runs in another container (ES_HOST), so probing
+# localhost:9200 here marked every container unhealthy, and the container already
+# exits when the monitor does.
 
 # Set the entrypoint for the container
 ENTRYPOINT ["python3", "./ct-monitor.py"]

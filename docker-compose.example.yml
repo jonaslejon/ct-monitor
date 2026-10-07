@@ -1,8 +1,6 @@
 # Docker Compose example for CT Monitor with Elasticsearch
 # Copy this file to docker-compose.yml and customize as needed
 
-version: '3.8'
-
 services:
   # Elasticsearch service for storing CT data
   elasticsearch:
@@ -34,15 +32,17 @@ services:
       - ES_USER=elastic
       - ES_PASSWORD=  # Set your password here
     volumes:
-      - ./data:/data  # Optional: for persistent data
+      - ct_state:/data  # --state-file lives here; a named volume keeps /data writable by the container user
       - ./config:/app/config  # Optional: for configuration files
     depends_on:
       elasticsearch:
         condition: service_healthy
     networks:
       - ct-network
-    # Example command for continuous monitoring to Elasticsearch
-    command: ["--es-output", "-f", "-n", "1000", "-p", "30"]
+    # SIGTERM drains the queues before exit; give it more than CT_DRAIN_TIMEOUT (150 s)
+    stop_grace_period: 3m
+    # Example command for continuous, gap-free monitoring to Elasticsearch that resumes after a restart
+    command: ["--es-output", "-f", "-n", "1000", "-p", "30", "--new-fetcher-logs", "all", "--state-file", "/data/state.json"]
     # Alternative: run with timeout for batch processing
     # command: ["--es-output", "--timeout", "60", "-n", "5000"]
 
@@ -62,6 +62,8 @@ services:
 
 volumes:
   elasticsearch_data:
+    driver: local
+  ct_state:
     driver: local
 
 networks:
