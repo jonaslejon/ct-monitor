@@ -153,8 +153,10 @@ class ElasticsearchOutput:
         xxh3_64 is a fast non-cryptographic hash (~95 ns vs ~500 ns for sha1). 64 bits
         is ample here: ids only need to be unique within one daily index (~60M pairs),
         where a collision is ~1e-4 per day and would cost one dropped row.
+        The key is encoded to UTF-8 first: xxhash 4 no longer accepts str, and xxhash 3
+        hashed a str as its UTF-8 bytes, so the ids are the same under both.
         """
-        return xxhash.xxh3_64_hexdigest(f"{domain}|{cert_hash}")
+        return xxhash.xxh3_64_hexdigest(f"{domain}|{cert_hash}".encode())
 
     def _seen_recently(self, index_name: str, doc_id: str, final: bool = True) -> bool:
         """True if doc_id was already queued for this index; records it otherwise.
