@@ -1631,7 +1631,8 @@ def main():
                        help='Use the gap-free fetcher for logs whose URL contains any of these '
                             'comma-separated substrings, or "all"')
     parser.add_argument('--fetch-workers', metavar='MAP',
-                       help='Parallel ranges per log for the gap-free fetcher, e.g. "argon2026h2=4"')
+                       help='Parallel ranges per log for the gap-free fetcher, e.g. "argon=16,xenon=4" '
+                            '(keys are URL substrings: key by log family, not shard)')
     parser.add_argument('--logs', metavar='SUBSTRINGS',
                        help='Only monitor logs whose URL contains any of these comma-separated '
                             'substrings (with --exclude-logs, lets several processes share the logs)')
