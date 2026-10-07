@@ -14,7 +14,8 @@ on:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for Ubuntu 26.04, which ubuntu-latest becomes from 2026-10-19
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     # The suite takes about a minute; a hung test used to hold each job for the 6-hour default
     timeout-minutes: 20
     strategy:
