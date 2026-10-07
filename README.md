@@ -159,15 +159,16 @@ systemd, set `TimeoutStopSec` above `CT_DRAIN_TIMEOUT`. `Ctrl-C` still stops imm
 
 ## 🐳 Docker Usage
 
-You can also run ct-monitor using the official Docker image from Docker Hub.
+You can also run ct-monitor using the official Docker image from Docker Hub, built for `linux/amd64`
+and `linux/arm64`.
 
-> ⚠️ The Docker Hub image is still version **1.3.0** (September 2025). It has none of the 1.4.0 changes
-> above. To run the current code, build the image from this repository and use `ct-monitor` in place of
-> `jonaslejon/ct-monitor:latest` in the examples below:
->
-> ```bash
-> docker build -t ct-monitor .
-> ```
+| Tag | Image |
+|-----|-------|
+| `latest`, `1.4.0`, `1.4` | The current release |
+| `latest-attested`, `1.4.0-attested` | The same image. Every image now carries SBOM and provenance attestations ([SECURE_ATTESTATIONS.md](SECURE_ATTESTATIONS.md)) |
+| `1.3.0`, `1.2.0` | Earlier releases, kept for pinning |
+
+To build the image from this repository instead: `docker build -t ct-monitor .`
 
 ### Pull the image
 
@@ -189,7 +190,15 @@ docker run --rm -it jonaslejon/ct-monitor:latest -f -n 500
 
 # With DNS resolution (requires .env file mounted)
 docker run --rm -it -v $(pwd)/.env:/app/.env jonaslejon/ct-monitor:latest --es-output --dns-resolve --dns-public -n 1000
+
+# Long-running, gap-free, resuming after a restart: keep the state file in the /data volume
+docker run -d --name ct-monitor --stop-timeout 180 -v ct-state:/data -v $(pwd)/.env:/app/.env \
+  jonaslejon/ct-monitor:latest --es-output -f --new-fetcher-logs all --state-file /data/state.json
 ```
+
+`docker stop` sends `SIGTERM` but kills the container after 10 seconds unless told otherwise. Give the
+graceful stop more time than `CT_DRAIN_TIMEOUT` (150 s by default) with `--stop-timeout 180` on
+`docker run`, or `stop_grace_period: 3m` in Compose.
 
 ### Advanced Examples
 

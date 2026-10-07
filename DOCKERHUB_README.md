@@ -22,17 +22,20 @@ docker run --rm jonaslejon/ct-monitor:latest -f -n 500
 
 ### Image Tags
 
-- `latest` - Latest stable release (currently v1.2.0)
-- `1.2.0` - Specific version release
-- `1.1.1` - Previous version
+- `latest`, `1.4.0`, `1.4` - Current release (v1.4.0)
+- `latest-attested`, `1.4.0-attested` - The same image; every image carries SBOM and provenance attestations
+- `1.3.0`, `1.2.0` - Earlier releases
 
-### What's New in v1.2.0
+### What's New in v1.4.0
 
-- **Python 3.13** - Updated to latest Python version
-- **Smaller Image** - 99.7MB (reduced from 119MB)
-- **Elasticsearch 8.15.0** - Latest Elasticsearch support
-- **Environment Optimization** - Proper Python environment variables
-- **Multi-stage Build** - Optimized build process
+- **Gap-free fetching**: follows the entries a log actually returns, fetches ranges in parallel, and resumes from a state file after a restart (`--new-fetcher-logs`, `--fetch-workers`, `--state-file`)
+- **Precertificates are parsed**: many CAs log some certificates only as a precertificate
+- **One Elasticsearch document per issued certificate**: a precertificate and its final certificate collapse, and a certificate seen in several logs is stored once per daily index
+- **Bounded memory**: bounded queues and a capped Elasticsearch retry list
+- **Several processes can share the logs** (`--logs`, `--exclude-logs`)
+- **Stopping loses nothing**: `SIGTERM` drains the queues before exiting
+- **DNS resolution rework**: each name is resolved once, wildcards resolve their base name, lookups run continuously
+- **Image fixes**: `/data` is writable by the container user, and the health check that probed `localhost:9200` inside the container (always unhealthy) is gone
 
 ### Features
 
@@ -41,10 +44,12 @@ docker run --rm jonaslejon/ct-monitor:latest -f -n 500
 - 🤫 **Quiet Mode**: Clean JSON output perfect for automation
 - 🔍 **Verbose Mode**: Detailed certificate processing information
 - 📊 **Real-time Statistics**: Progress tracking and success rates
-- ⚡ **Rate Limit Handling**: Smart exponential backoff for CT log rate limits
+- ⚡ **Adaptive Rate Limiting**: Per-server rate control with a circuit breaker
 - 🔄 **Follow Mode**: Continuous monitoring for new certificates
+- 🧭 **Gap-free Fetching**: Parallel ranges per log, resume from a state file, graceful stop
 - 🌐 **Global Coverage**: Monitors all known CT logs or specific targets
-- 📦 **Elasticsearch Integration**: Direct output to Elasticsearch
+- 🌍 **DNS Resolution**: Resolve discovered domains, optionally via public resolvers in round-robin
+- 📦 **Elasticsearch Integration**: Daily indices, de-duplicated document ids, automatic retry
 
 ### Advanced Docker Usage
 
@@ -53,17 +58,22 @@ docker run --rm jonaslejon/ct-monitor:latest -f -n 500
 docker run --rm jonaslejon/ct-monitor:latest -q -m "github" -n 5000 > domains.json
 
 # Verbose debugging
-docker run --rm jonaslejon/ct-monitor:latest -v -l https://ct.googleapis.com/logs/xenon2025/ -n 100
+docker run --rm jonaslejon/ct-monitor:latest -v -l https://ct.googleapis.com/logs/eu1/xenon2026h2/ -n 100
 
 # Elasticsearch output (requires env variables)
 docker run --rm -e ES_HOST=http://elasticsearch:9200 \
   -e ES_USER=elastic -e ES_PASSWORD=your_password \
   jonaslejon/ct-monitor:latest --es-output -n 5000
 
-# Continuous monitoring to Elasticsearch
-docker run --rm -e ES_HOST=http://elasticsearch:9200 \
-  jonaslejon/ct-monitor:latest --es-output -f
+# Long-running, gap-free, resuming after a restart: keep the state file in the /data volume
+docker run -d --name ct-monitor --stop-timeout 180 -v ct-state:/data \
+  -e ES_HOST=http://elasticsearch:9200 -e ES_USER=elastic -e ES_PASSWORD=your_password \
+  jonaslejon/ct-monitor:latest --es-output -f --new-fetcher-logs all --state-file /data/state.json
 ```
+
+`docker stop` kills a container 10 seconds after `SIGTERM` unless told otherwise. Give the graceful stop
+more time than `CT_DRAIN_TIMEOUT` (150 s by default): `--stop-timeout 180` on `docker run`, or
+`stop_grace_period: 3m` in Compose.
 
 ### Environment Variables for Elasticsearch
 
@@ -73,17 +83,19 @@ ES_USER=elastic                        # Elasticsearch username
 ES_PASSWORD=your_password              # Elasticsearch password
 ```
 
+They can also come from a `.env` file mounted at `/app/.env`. The README lists the tuning variables
+(`CT_DRAIN_TIMEOUT`, queue sizes, retry caps).
+
 ### Docker Compose Example
 
-See `docker-compose.example.yml` for a complete setup with Elasticsearch and Kibana.
+See [`docker-compose.example.yml`](https://github.com/jonaslejon/ct-monitor/blob/main/docker-compose.example.yml) for a complete setup with Elasticsearch and Kibana.
 
 ### Image Details
 
 - **Base Image**: Python 3.13 Alpine
-- **Size**: 99.7MB
-- **Architecture**: Multi-arch support (amd64, arm64)
-- **Security**: Non-privileged user, minimal dependencies
-- **Health Check**: Built-in health monitoring
+- **Architecture**: Multi-arch (amd64, arm64)
+- **Security**: Non-privileged user, minimal dependencies, SBOM and provenance attestations
+- **Volume**: `/data`, writable by the container user (use it for `--state-file`)
 
 ### Source Code
 

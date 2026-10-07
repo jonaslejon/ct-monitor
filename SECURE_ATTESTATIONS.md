@@ -18,6 +18,9 @@ Add these secrets to your GitHub repository settings:
 - `DOCKERHUB_USERNAME`: Your Docker Hub username
 - `DOCKERHUB_TOKEN`: Your Docker Hub access token (with write permissions)
 
+Until these are set, the workflow fails at the Docker Hub login, so releases are pushed with the build
+script below.
+
 ### 2. Local Build (Optional)
 
 For local development with attestations:
@@ -33,16 +36,18 @@ chmod +x build-with-attestations.sh
 ./build-with-attestations.sh --push
 ```
 
-**Note**: Without the `--push` flag, images are loaded locally. With `--push`, images are pushed directly to Docker Hub.
+**Note**: Without the `--push` flag, the image is built for this machine's platform and loaded locally,
+tagged `-attested` only. With `--push`, it is built for amd64 and arm64 and pushed with every release tag:
+`<version>`, `<major.minor>`, `latest`, `<version>-attested` and `latest-attested`. A push refuses to run
+with uncommitted changes, so the image's `org.opencontainers.image.revision` label names its commit.
 
 ## GitHub Actions Workflow
 
 The `.github/workflows/docker-attestations.yml` workflow will automatically:
 
-1. Build multi-architecture images (amd64 + arm64)
+1. Build multi-architecture images (amd64 + arm64, arm64 under QEMU)
 2. Generate SBOM and provenance attestations
-3. Push to Docker Hub with version tags
-4. Enable vulnerability scanning
+3. Push to Docker Hub with the same tags as the build script, plus `sha-<commit>`
 
 ## Verification
 
@@ -50,18 +55,14 @@ The `.github/workflows/docker-attestations.yml` workflow will automatically:
 
 ```bash
 # Inspect image attestations
-docker buildx imagetools inspect jonaslejon/ct-monitor:latest-attested
+docker buildx imagetools inspect jonaslejon/ct-monitor:latest
 
-# Check SBOM
-docker sbom jonaslejon/ct-monitor:latest-attested
+# Show the provenance and the SBOM
+docker buildx imagetools inspect jonaslejon/ct-monitor:latest --format '{{ json .Provenance }}'
+docker buildx imagetools inspect jonaslejon/ct-monitor:latest --format '{{ json .SBOM }}'
 ```
 
-### Verify Image Integrity
-
-```bash
-# Verify image signature (if using cosign)
-docker verify jonaslejon/ct-monitor:latest-attested
-```
+The images are not signed (no cosign signature), so there is no signature to verify yet.
 
 ## Benefits
 
@@ -73,7 +74,7 @@ docker verify jonaslejon/ct-monitor:latest-attested
 ## Next Steps
 
 1. Set up Docker Hub secrets in GitHub
-2. Tag a release (e.g., `git tag v1.2.0 && git push origin v1.2.0`)
+2. Tag a release (e.g., `git tag v1.4.1 && git push origin v1.4.1`)
 3. The workflow will automatically build and push with attestations
 
 ## References
