@@ -1620,9 +1620,10 @@ def main():
     parser.add_argument('--dns-resolve', action='store_true',
                        help='Enable DNS resolution for discovered domains')
     parser.add_argument('--dns-workers', type=int, default=20,
-                       help='Number of concurrent DNS resolution workers (default: 20)')
+                       help='DNS concurrency: each of the 4 resolver threads keeps 2 x this many '
+                            'lookups in flight (default: 20)')
     parser.add_argument('--dns-cache-size', type=int, default=10000,
-                       help='DNS cache size (default: 10000)')
+                       help='Host names kept in the DNS answer cache, for 15 minutes (default: 10000)')
     parser.add_argument('--dns-public', action='store_true',
                        help='Use public DNS resolvers (1.1.1.1, 8.8.8.8, etc.) with round-robin')
     parser.add_argument('--state-file', metavar='PATH',
